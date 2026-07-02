@@ -1,0 +1,7 @@
+db_path: data/neurolink.db
+test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+top_k: [10, 50]
+models:
+  - centroid_trajectory
+semantic_threshold: 0.55
+critical_only: false

@@ -1,0 +1,12 @@
+db_path: data/neurolink.db
+test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+top_k: [10, 50]
+models:
+  - centroid_trajectory
+seed: 42
+centroid:
+  top_tracks: 8
+  llm:
+    max_new_tokens: 96
+    temperature: 0.75
+    top_p: 0.9

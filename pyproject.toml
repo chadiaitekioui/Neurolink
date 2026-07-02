@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurolink"
+version = "0.1.0"
+description = "Pipeline to forecast emergent neuroscience research directions"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "dacite>=1.8",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "requests>=2.31",
+    "rich>=13.0",
+    "transformers>=4.40",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "sentence-transformers>=2.7",
+    "bertopic>=0.16",
+    "umap-learn>=0.5",
+    "hdbscan>=0.8",
+]
+train = [
+    "peft>=0.10",
+    "accelerate>=0.30",
+    "bitsandbytes>=0.42.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+all = [
+    "neurolink[dev,ml,train]",
+]
+
+[project.scripts]
+neurolink = "neurolink.utils.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: tests that call PubMed or OpenAlex APIs",
+]

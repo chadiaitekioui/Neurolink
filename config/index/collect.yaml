@@ -1,0 +1,8 @@
+db_path: data/neurolink.db
+mesh: Neurosciences
+year_from: 2010
+year_to: 2025
+exclude_reviews: true
+retmax: 500
+batch_size: 200
+delay_seconds: 0.34

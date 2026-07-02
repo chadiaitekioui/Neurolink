@@ -1,0 +1,22 @@
+db_path: data/neurolink.db
+test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+top_k: [10, 50]
+models:
+  - literature_lora
+seed: 42
+literature:
+  adapter_dir: data/models/literature
+  max_context_questions: 25
+  backend: lora
+  use_4bit: true
+  train_epochs: 1
+  train_lr: 0.0002
+  max_examples_per_year: 25
+  error_train_epochs: 2
+  error_max_examples: 50
+  semantic_threshold: 0.55
+  error_critical_only: true
+  llm:
+    max_new_tokens: 96
+    temperature: 0.75
+    top_p: 0.9

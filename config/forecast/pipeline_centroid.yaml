@@ -1,0 +1,7 @@
+track: centroid
+db_path: data/neurolink.db
+topics_config: config/forecast/topics.yaml
+predict_config: config/forecast/predict_centroid.yaml
+stages:
+  - topics
+  - predict

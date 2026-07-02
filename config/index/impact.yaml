@@ -1,0 +1,3 @@
+db_path: data/neurolink.db
+critical_percentile: 0.90
+delay_seconds: 0.1

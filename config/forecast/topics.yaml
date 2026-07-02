@@ -1,0 +1,9 @@
+db_path: data/neurolink.db
+min_questions: 5
+n_topics: 12
+growth_weight: 0.35
+novelty_weight: 0.25
+atypicality_weight: 0.25
+semantic_shift_weight: 0.15
+history_window: 5
+match_threshold: 0.55

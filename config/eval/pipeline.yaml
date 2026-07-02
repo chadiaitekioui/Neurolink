@@ -1,0 +1,2 @@
+db_path: data/neurolink.db
+eval_config: config/eval/eval.yaml
