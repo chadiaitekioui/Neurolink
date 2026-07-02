@@ -1,4 +1,4 @@
-"""Layer 2 — forecast: topics + predict (centroid or literature)."""
+"""Forecast: topics + predict (centroid or literature)."""
 
 from .pipeline import (
     CENTROID_STAGES,
@@ -20,7 +20,6 @@ from .topics import TopicsConfig, compute_centroids, match_clusters_to_tracks, r
 from .train import (
     calibration_years,
     run_lora_forecast,
-    run_rolling_literature,
     run_train_literature,
     run_train_literature_errors,
 )
@@ -43,7 +42,6 @@ __all__ = [
     "run_literature_forecast",
     "run_lora_forecast",
     "run_predict",
-    "run_rolling_literature",
     "run_topics",
     "run_train_literature",
     "run_train_literature_errors",

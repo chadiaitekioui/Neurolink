@@ -240,42 +240,6 @@ def run_lora_forecast(
     return run_id
 
 
-def run_rolling_literature(
-    config_path: str | Path | PredictConfig,
-    *,
-    year_max_start: int | None = None,
-    target_year: int | None = None,
-    run_id: str | None = None,
-) -> str:
-    """CLI helper — calibration through test_years, optional explicit target_year."""
-    cfg = (
-        load_config(config_path, PredictConfig)
-        if isinstance(config_path, (str, Path))
-        else config_path
-    )
-    db = Database(resolve_path(cfg.db_path))
-    with db.connect() as conn:
-        cal_years = infer_test_years(conn, cfg.test_years)
-
-    if target_year is None:
-        target_year = max(cal_years) + 1 if cal_years else 0
-    calibration_start = (
-        min(cal_years) if year_max_start is None else year_max_start + 1
-    )
-    if year_max_start is not None and cal_years:
-        calibration_start = max(calibration_start, min(cal_years))
-
-    return run_lora_forecast(
-        cfg,
-        target_year,
-        calibrate_errors=True,
-        calibration_start=calibration_start,
-        train_initial=True,
-        run_eval=True,
-        run_id=run_id,
-    )
-
-
 def check_literature_adapter(cfg: LiteratureLoraConfig, year_max: int) -> None:
     adapter = _adapter_path(cfg, year_max) / "lora"
     if not adapter.exists():

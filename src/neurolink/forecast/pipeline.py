@@ -19,7 +19,6 @@ from .topics import run_topics
 from .train import (
     check_literature_adapter,
     infer_year_max,
-    run_rolling_literature,
     run_train_literature,
     run_train_literature_errors,
 )
@@ -28,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 CENTROID_STAGES = ("topics", "predict")
 LITERATURE_STAGES = ("train_literature", "predict")
-LITERATURE_ROLLING_STAGES = ("rolling_literature",)
 
 
 @dataclass
@@ -38,7 +36,6 @@ class ForecastPipelineConfig:
     topics_config: str = "config/forecast/topics.yaml"
     predict_config: str = "config/forecast/predict_literature.yaml"
     year_max: int | None = None
-    year_max_start: int | None = None
     error_target_year: int | None = None
     pred_run_id: str | None = None
     stages: list[str] = field(default_factory=list)
@@ -94,13 +91,6 @@ def run_literature_forecast(config_path: str | Path, run_id: str | None = None) 
     check_index_ready(cfg.db_path)
     run_id = run_id or make_run_id("forecast_literature")
     logger.info("Forecast literature run_id=%s", run_id)
-
-    if "rolling_literature" in stages:
-        return run_rolling_literature(
-            cfg.predict_config,
-            year_max_start=cfg.year_max_start,
-            run_id=run_id,
-        )
 
     year_max = cfg.year_max
 

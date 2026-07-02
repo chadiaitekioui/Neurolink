@@ -12,7 +12,6 @@ from ..forecast import (
     run_centroid_forecast,
     run_literature_forecast,
     run_predict,
-    run_rolling_literature,
     run_topics,
     run_train_literature,
     run_train_literature_errors,
@@ -87,10 +86,6 @@ def cmd_train_literature_errors(args: argparse.Namespace) -> None:
         pred_run_id=args.pred_run_id,
         eval_k=args.eval_k,
     )
-
-
-def cmd_rolling_literature(args: argparse.Namespace) -> None:
-    run_rolling_literature(args.config, year_max_start=args.year_max_start)
 
 
 def cmd_centroid(args: argparse.Namespace) -> None:
@@ -187,14 +182,6 @@ def main(argv: list[str] | None = None) -> None:
     tre.add_argument("--pred-run-id", default=None)
     tre.add_argument("--eval-k", type=int, default=None)
     tre.set_defaults(func=cmd_train_literature_errors)
-
-    roll = sub.add_parser(
-        "rolling-literature",
-        help="Rolling forecast: predict N, error-train on N, repeat",
-    )
-    roll.add_argument("--config", default="config/forecast/predict_literature.yaml")
-    roll.add_argument("--year-max-start", type=int, default=None)
-    roll.set_defaults(func=cmd_rolling_literature)
 
     cent = sub.add_parser("centroid", help="Run centroid forecast track")
     cent.add_argument("--config", default="config/forecast/pipeline_centroid.yaml")
