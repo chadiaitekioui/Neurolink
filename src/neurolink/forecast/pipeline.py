@@ -114,8 +114,8 @@ def run_literature_forecast(config_path: str | Path, run_id: str | None = None) 
         if year_max is None or year_max <= 0:
             logger.warning("Cannot predict literature_lora without a valid year_max")
             return run_id
-        check_literature_adapter(predict_cfg.literature, year_max)
-        predict_cfg.models = [MODEL_LITERATURE_LORA]
+        if MODEL_LITERATURE_LORA in predict_cfg.models:
+            check_literature_adapter(predict_cfg.literature, year_max)
         run_predict(predict_cfg, run_id)
 
     logger.info("Forecast literature finished.")

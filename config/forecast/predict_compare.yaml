@@ -1,11 +1,15 @@
 db_path: data/neurolink.db
-test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+# test_years inferred at runtime: all question years strictly after the chosen LoRA year_max
+test_years: []
 top_k: [10, 50]
 models:
   - literature_lora
+  - mistral_base
+  - braingpt
 seed: 42
 literature:
   adapter_dir: data/models/literature
+  braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
   max_context_questions: 40
   backend: lora
   use_4bit: true
@@ -17,7 +21,6 @@ literature:
   error_max_examples: 50
   semantic_threshold: 0.55
   error_critical_only: true
-  braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
   llm:
     max_new_tokens: 96
     temperature: 0.75

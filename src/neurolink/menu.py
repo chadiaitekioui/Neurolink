@@ -17,14 +17,17 @@ import shutil
 from .db import Database
 from .eval import EvalConfig, run_eval
 from .forecast import (
-    MODEL_CENTROID_TRAJECTORY,
+    MODEL_BRAINGPT,
     MODEL_LITERATURE_LORA,
+    MODEL_MISTRAL_BASE,
     PredictConfig,
     calibration_years,
+    resolve_benchmark,
     run_lora_forecast,
     run_predict,
-    run_topics,
+    run_train_literature,
 )
+from .forecast.predict.literature_lora import adapter_exists, list_saved_lora_year_max
 from .utils.hf_auth import hf_token_available, set_hf_token
 from .index import (
     CollectConfig,
@@ -46,10 +49,9 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 PREDICT_LITERATURE_CONFIG = "config/forecast/predict_literature.yaml"
-PREDICT_CENTROID_CONFIG = "config/forecast/predict_centroid.yaml"
-TOPICS_CONFIG = "config/forecast/topics.yaml"
-EVAL_CENTROID_CONFIG = "config/eval/eval_centroid.yaml"
+PREDICT_COMPARE_CONFIG = "config/forecast/predict_compare.yaml"
 EVAL_LITERATURE_CONFIG = "config/eval/eval_literature.yaml"
+EVAL_COMPARE_CONFIG = "config/eval/eval_compare.yaml"
 INDEX_PIPELINE_CONFIG = "config/index/pipeline.yaml"
 COLLECT_CONFIG = "config/index/collect.yaml"
 SEGMENT_CONFIG = "config/index/segment.yaml"
@@ -72,23 +74,12 @@ def _banner() -> None:
         console.print(Text.from_markup(line.center(console_width), style="bold white"))
     console.print(
         Panel(
-            """Modular pipeline to forecast emergent neuroscience research directions from PubMed literature using two approaches:\n
-            1 - Centroid trajectory: neuroscience topics are centroids; research questions are points in their clusters.\n
-            2 - Literature LoRA: fine-tune Mistral-7B on temporal question pairs.\n""",
+            """Modular pipeline to forecast emergent neuroscience research directions from PubMed literature.\n
+            1 - Literature LoRA: fine-tune Mistral-7B on temporal question pairs.\n
+            2 - Benchmark: compare LoRA vs Mistral-7B vs BrainGPT on years after a saved LoRA year_max.\n""",
             border_style="green",
         )
     )
-
-
-def _parse_years(raw: str, default: list[int]) -> list[int]:
-    raw = raw.strip()
-    if not raw:
-        return default
-    try:
-        return [int(y.strip()) for y in raw.split(",") if y.strip()]
-    except ValueError:
-        console.print("[yellow]Invalid format — using default years.[/yellow]")
-        return default
 
 
 def _show_params_table(title: str, rows: list[tuple[str, str]]) -> None:
@@ -98,18 +89,6 @@ def _show_params_table(title: str, rows: list[tuple[str, str]]) -> None:
     for k, v in rows:
         table.add_row(k, v)
     console.print(table)
-
-
-def _common_predict_params(cfg: PredictConfig) -> PredictConfig:
-    console.print("\n[bold]Common parameters[/bold]")
-    db = Prompt.ask("SQLite database", default=cfg.db_path)
-    years_raw = Prompt.ask(
-        "Test years (comma-separated)",
-        default=",".join(str(y) for y in cfg.test_years),
-    )
-    top_k = IntPrompt.ask("Max top-k predictions", default=max(cfg.top_k) if cfg.top_k else 50)
-    test_years = _parse_years(years_raw, cfg.test_years)
-    return replace(cfg, db_path=db, test_years=test_years, top_k=[top_k])
 
 
 @dataclass
@@ -197,7 +176,34 @@ def _configure_literature(cfg: PredictConfig) -> LiteratureSession | None:
         )
 
     top_k = IntPrompt.ask("Max top-k predictions", default=max(cfg.top_k) if cfg.top_k else 50)
-    train_first = Confirm.ask("Train LoRA before predict?", default=True)
+
+    literature_defaults = cfg.literature
+    saved = list_saved_lora_year_max(literature_defaults)
+    year_max = target_year - 1
+    has_adapter = adapter_exists(literature_defaults, year_max)
+
+    if saved:
+        console.print(
+            f"[dim]Saved LoRA adapters (year_max): {', '.join(map(str, saved))}[/dim]"
+        )
+    else:
+        console.print("[yellow]No saved LoRA adapters in data/models/literature/.[/yellow]")
+
+    if has_adapter:
+        console.print(
+            f"[green]Local adapter found:[/green] "
+            f"data/models/literature/year_max_{year_max}/lora/"
+        )
+        train_first = Confirm.ask(
+            "Train LoRA before predict? (No = inference with saved weights)",
+            default=False,
+        )
+    else:
+        console.print(
+            f"[yellow]No adapter for year_max_{year_max} — training required before predict.[/yellow]"
+        )
+        train_first = Confirm.ask("Train LoRA before predict?", default=True)
+
     max_ctx = IntPrompt.ask("Context questions", default=cfg.literature.max_context_questions)
     temp = FloatPrompt.ask("Generation temperature", default=cfg.literature.llm.temperature)
     tokens = IntPrompt.ask("Max tokens per question", default=cfg.literature.llm.max_new_tokens)
@@ -241,58 +247,149 @@ def _confirm_literature(session: LiteratureSession) -> bool:
             )
         cal_label = ", ".join(map(str, years)) + f" → {session.target_year}"
 
+    year_max = session.target_year - 1
+    has_adapter = adapter_exists(cfg.literature, year_max)
+
     _show_params_table(
         "literature_lora summary",
         [
             ("Model", MODEL_LITERATURE_LORA),
             ("Database", cfg.db_path),
             ("Target year", str(session.target_year)),
+            ("LoRA adapter", f"year_max_{year_max} ({'found' if has_adapter else 'missing'})"),
+            ("Mode", "train + predict" if session.train_first else "inference only"),
             ("Error-train calibration", str(session.calibrate_errors)),
             ("Calibration path", cal_label),
             ("Literature through (simple)", str(session.year_max)),
             ("Top-k", str(max(cfg.top_k))),
             ("Context questions", str(cfg.literature.max_context_questions)),
             ("Temperature", f"{cfg.literature.llm.temperature:.2f}"),
-            ("Train before predict", str(session.train_first)),
         ],
     )
     return Confirm.ask("\nRun LoRA?", default=True)
 
 
-def _configure_centroid(cfg: PredictConfig) -> PredictConfig:
-    cfg = _common_predict_params(cfg)
-    console.print("\n[bold magenta]Centroid trajectory[/bold magenta]")
-    top_tracks = IntPrompt.ask("Number of tracks", default=cfg.centroid.top_tracks)
-    temp = FloatPrompt.ask("Generation temperature", default=cfg.centroid.llm.temperature)
-    tokens = IntPrompt.ask("Max tokens per question", default=cfg.centroid.llm.max_new_tokens)
-    use_4bit = Confirm.ask("4-bit quantization?", default=cfg.centroid.llm.use_4bit)
+@dataclass
+class CompareSession:
+    cfg: PredictConfig
+    lora_anchor_year_max: int
+    benchmark_years: list[int]
 
-    centroid = replace(
-        cfg.centroid,
-        top_tracks=top_tracks,
-        llm=replace(cfg.centroid.llm, temperature=temp, max_new_tokens=tokens, use_4bit=use_4bit),
-    )
-    return replace(
-        cfg,
-        centroid=centroid,
-        models=[MODEL_CENTROID_TRAJECTORY],
+
+def _configure_compare(base_cfg: PredictConfig) -> CompareSession | None:
+    console.print("\n[bold magenta]LLM benchmark[/bold magenta]")
+    console.print(
+        "[dim]Compare literature_lora · mistral_base · braingpt on years "
+        "strictly after a saved LoRA year_max.[/dim]"
     )
 
+    db_path = Prompt.ask("SQLite database", default=base_cfg.db_path)
+    cfg = replace(base_cfg, db_path=db_path)
 
-def _confirm_centroid(cfg: PredictConfig, run_topics: bool) -> bool:
+    saved = list_saved_lora_year_max(cfg.literature)
+    if not saved:
+        console.print("[yellow]No saved LoRA adapters found.[/yellow]")
+        if Confirm.ask("Train a new LoRA adapter now?", default=True):
+            train_year_max = IntPrompt.ask(
+                "Literature through year (year_max)",
+                default=max(cfg.test_years) - 1 if cfg.test_years else 2023,
+            )
+            if not _ensure_hf_token():
+                return None
+            try:
+                with console.status("[bold green]Training LoRA…", spinner="dots"):
+                    run_train_literature(
+                        replace(cfg, test_years=[train_year_max + 1]),
+                        year_max=train_year_max,
+                    )
+            except Exception as e:
+                console.print(f"[red]Training failed: {e}[/red]")
+                return None
+            saved = list_saved_lora_year_max(cfg.literature)
+        if not saved:
+            console.print("[red]A saved LoRA adapter is required for the benchmark.[/red]")
+            return None
+
+    console.print(f"[dim]Saved LoRA adapters (year_max): {', '.join(map(str, saved))}[/dim]")
+    default_anchor = saved[-1]
+    lora_anchor = IntPrompt.ask(
+        "LoRA anchor year_max (literature trained through)",
+        default=default_anchor,
+    )
+    if lora_anchor not in saved:
+        console.print(
+            f"[red]year_max_{lora_anchor} not found. Available: {', '.join(map(str, saved))}[/red]"
+        )
+        return None
+
+    try:
+        benchmark_cfg, anchor, benchmark_years = resolve_benchmark(
+            cfg, lora_year_max=lora_anchor, db_path=db_path
+        )
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        return None
+
+    console.print(
+        f"[green]Benchmark years (>{anchor}):[/green] {', '.join(map(str, benchmark_years))}"
+    )
+
+    include_lora = Confirm.ask("Include literature_lora?", default=True)
+    include_mistral = Confirm.ask("Include mistral_base?", default=True)
+    include_braingpt = Confirm.ask("Include braingpt?", default=True)
+    models: list[str] = []
+    if include_lora:
+        models.append(MODEL_LITERATURE_LORA)
+    if include_mistral:
+        models.append(MODEL_MISTRAL_BASE)
+    if include_braingpt:
+        models.append(MODEL_BRAINGPT)
+    if not models:
+        console.print("[red]Select at least one model.[/red]")
+        return None
+
+    top_k = IntPrompt.ask("Max top-k predictions", default=max(cfg.top_k) if cfg.top_k else 50)
+    max_ctx = IntPrompt.ask("Context questions", default=cfg.literature.max_context_questions)
+    temp = FloatPrompt.ask("Generation temperature", default=cfg.literature.llm.temperature)
+    tokens = IntPrompt.ask("Max tokens per question", default=cfg.literature.llm.max_new_tokens)
+    use_4bit = Confirm.ask("4-bit quantization?", default=cfg.literature.use_4bit)
+
+    literature = replace(
+        benchmark_cfg.literature,
+        max_context_questions=max_ctx,
+        use_4bit=use_4bit,
+        llm=replace(benchmark_cfg.literature.llm, temperature=temp, max_new_tokens=tokens),
+    )
+    final_cfg = replace(
+        benchmark_cfg,
+        top_k=[top_k],
+        models=models,
+        literature=literature,
+    )
+    return CompareSession(
+        cfg=final_cfg,
+        lora_anchor_year_max=anchor,
+        benchmark_years=benchmark_years,
+    )
+
+
+def _confirm_compare(session: CompareSession) -> bool:
+    cfg = session.cfg
     _show_params_table(
-        "centroid_trajectory summary",
+        "benchmark summary",
         [
-            ("Model", MODEL_CENTROID_TRAJECTORY),
+            ("Models", ", ".join(cfg.models)),
             ("Database", cfg.db_path),
-            ("Test years", ", ".join(map(str, cfg.test_years))),
+            ("LoRA anchor (year_max)", str(session.lora_anchor_year_max)),
+            ("Benchmark years", ", ".join(map(str, session.benchmark_years))),
             ("Top-k", str(max(cfg.top_k))),
-            ("Tracks", str(cfg.centroid.top_tracks)),
-            ("Temperature", f"{cfg.centroid.llm.temperature:.2f}"),
-            ("Run topics first", str(run_topics)),
+            ("Context questions", str(cfg.literature.max_context_questions)),
+            ("Temperature", f"{cfg.literature.llm.temperature:.2f}"),
+            ("4-bit", str(cfg.literature.use_4bit)),
+            ("BrainGPT adapter", cfg.literature.braingpt_adapter),
         ],
     )
-    return Confirm.ask("\nRun Centroid trajectory?", default=True)
+    return Confirm.ask("\nRun benchmark?", default=True)
 
 
 def _optional_str(prompt: str, default: str | None) -> str | None:
@@ -370,8 +467,11 @@ def _init_database(db_path: str) -> None:
 
 def _configure_collect(cfg: CollectConfig) -> CollectConfig:
     console.print("\n[bold]Collect (PubMed API)[/bold]")
-    mesh = Prompt.ask("MeSH term", default=cfg.mesh)
-    term = _optional_str("Custom PubMed query (empty = MeSH)", cfg.term)
+    term = _optional_str(
+        "PubMed query (empty = MeSH)",
+        cfg.term or cfg.mesh,
+    )
+    mesh = Prompt.ask("MeSH fallback (if query empty)", default=cfg.mesh)
     year_from = IntPrompt.ask("Year from", default=cfg.year_from)
     year_to = IntPrompt.ask("Year to", default=cfg.year_to)
     exclude_reviews = Confirm.ask("Exclude reviews?", default=cfg.exclude_reviews)
@@ -382,7 +482,7 @@ def _configure_collect(cfg: CollectConfig) -> CollectConfig:
     return replace(
         cfg,
         mesh=mesh,
-        term=term,
+        term=term if term else None,
         year_from=year_from,
         year_to=year_to,
         exclude_reviews=exclude_reviews,
@@ -441,12 +541,12 @@ def _configure_embed(cfg: EmbedConfig) -> EmbedConfig:
 
 
 def _show_collect_summary(cfg: CollectConfig) -> None:
+    query = cfg.term if cfg.term else f"{cfg.mesh}[MeSH]"
     _show_params_table(
         "collect",
         [
             ("Database", cfg.db_path),
-            ("MeSH", cfg.mesh),
-            ("Custom query", cfg.term or "(MeSH)"),
+            ("Query", query),
             ("Years", f"{cfg.year_from}–{cfg.year_to}"),
             ("Exclude reviews", str(cfg.exclude_reviews)),
             ("retmax", str(cfg.retmax)),
@@ -654,12 +754,22 @@ def _run_index_menu(initial_db: str | None = None) -> IndexSession:
 
 def _run_literature(session: LiteratureSession) -> None:
     cfg = session.cfg
+    year_max = session.target_year - 1
     if not _ensure_index_or_continue(cfg.db_path):
         console.print("[yellow]Cancelled.[/yellow]")
         return
     if not _ensure_hf_token():
         console.print("[yellow]Cancelled — Hugging Face token required.[/yellow]")
         return
+    if not session.train_first and not adapter_exists(cfg.literature, year_max):
+        console.print(
+            f"[red]No local adapter at year_max_{year_max} — cannot run inference only.[/red]"
+        )
+        if Confirm.ask("Train LoRA now?", default=True):
+            session = replace(session, train_first=True)
+        else:
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
     if not _confirm_literature(session):
         console.print("[yellow]Cancelled.[/yellow]")
         return
@@ -692,35 +802,45 @@ def _run_literature(session: LiteratureSession) -> None:
         logger.exception("LoRA failed")
 
 
-def _run_centroid(cfg: PredictConfig) -> None:
+def _run_compare(session: CompareSession) -> None:
+    cfg = session.cfg
     if not _ensure_index_or_continue(cfg.db_path):
         console.print("[yellow]Cancelled.[/yellow]")
         return
-    run_topics_first = Confirm.ask("Run [bold]topics[/bold] before predict?", default=True)
-    if not _confirm_centroid(cfg, run_topics_first):
+    if not _ensure_hf_token():
+        console.print("[yellow]Cancelled — Hugging Face token required.[/yellow]")
+        return
+
+    if not _confirm_compare(session):
         console.print("[yellow]Cancelled.[/yellow]")
         return
-    run_eval_after = Confirm.ask("Run evaluation after predict?", default=True)
+
+    run_eval_after = Confirm.ask(
+        "Run evaluation (P@k, BrainBench, contamination) after benchmark?",
+        default=True,
+    )
+
     try:
-        with console.status("[bold green]Running Centroid trajectory…", spinner="dots"):
-            if run_topics_first:
-                run_topics(TOPICS_CONFIG)
-            run_predict(cfg)
+        with console.status("[bold green]Running LLM benchmark…", spinner="dots"):
+            pred_run_id = make_run_id("menu_benchmark")
+            run_predict(cfg, run_id=pred_run_id)
         if run_eval_after:
             with console.status("[bold green]Evaluating…", spinner="dots"):
-                eval_cfg = load_config(EVAL_CENTROID_CONFIG, EvalConfig)
+                eval_cfg = load_config(EVAL_COMPARE_CONFIG, EvalConfig)
                 eval_cfg = replace(
                     eval_cfg,
                     db_path=cfg.db_path,
-                    test_years=cfg.test_years,
+                    test_years=session.benchmark_years,
                     top_k=cfg.top_k,
-                    models=[MODEL_CENTROID_TRAJECTORY],
+                    models=cfg.models,
+                    predict_config=PREDICT_COMPARE_CONFIG,
+                    run_id=pred_run_id,
                 )
-                run_eval(eval_cfg)
-        console.print(Panel("[bold green]✓ Centroid trajectory done[/bold green]", border_style="green"))
+                run_eval(eval_cfg, run_id=make_run_id("eval"))
+        console.print(Panel("[bold green]✓ Benchmark done[/bold green]", border_style="green"))
     except Exception as e:
         console.print(Panel(f"[bold red]Error:[/bold red] {e}", border_style="red"))
-        logger.exception("Centroid trajectory failed")
+        logger.exception("Benchmark failed")
 
 
 def _show_status() -> None:
@@ -767,14 +887,13 @@ def _show_status() -> None:
 def run_menu() -> None:
     _banner()
     base_lit = load_config(PREDICT_LITERATURE_CONFIG, PredictConfig)
-    base_cent = load_config(PREDICT_CENTROID_CONFIG, PredictConfig)
+    base_cmp = load_config(PREDICT_COMPARE_CONFIG, PredictConfig)
 
     while True:
         console.print()
         console.print(
-            "  [cyan]1[/cyan] Index   [cyan]2[/cyan] LoRA   "
-            "[cyan]3[/cyan] Centroid trajectory   [cyan]4[/cyan] Database status   "
-            "[cyan]0[/cyan] Quit"
+            "  [cyan]1[/cyan] Index   [cyan]2[/cyan] LoRA   [cyan]3[/cyan] Benchmark LLMs   "
+            "[cyan]4[/cyan] Database status   [cyan]0[/cyan] Quit"
         )
         choice = Prompt.ask(
             "[bold]Choose an action[/bold]",
@@ -793,7 +912,9 @@ def run_menu() -> None:
             if session is not None:
                 _run_literature(session)
         elif choice == "3":
-            _run_centroid(_configure_centroid(base_cent))
+            session = _configure_compare(base_cmp)
+            if session is not None:
+                _run_compare(session)
         elif choice == "4":
             _show_status()
 

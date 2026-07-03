@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 
 from ..db import Database
-from ..eval import EvalConfig, run_eval
 from ..utils.config import available_question_years, infer_test_years, load_config, make_run_id, resolve_path
 from .predict.literature_lora import (
     LiteratureLoraConfig,
@@ -124,6 +123,8 @@ def _predict_year(cfg: PredictConfig, year: int, run_id: str) -> None:
 
 
 def _eval_year(cfg: PredictConfig, year: int, pred_run_id: str) -> None:
+    from ..eval import EvalConfig, run_eval
+
     eval_cfg = EvalConfig(
         db_path=cfg.db_path,
         test_years=[year],
@@ -170,7 +171,10 @@ def run_lora_forecast(
     if not calibrate_errors:
         year_max = target_year - 1
         if train_initial:
-            run_train_literature(cfg, year_max=year_max, run_id=run_id)
+            if not adapter_exists(cfg.literature, year_max):
+                run_train_literature(cfg, year_max=year_max, run_id=run_id)
+            else:
+                logger.info("Reusing adapter year_max_%d", year_max)
         _predict_year(cfg, target_year, run_id)
         if run_eval:
             _eval_year(cfg, target_year, run_id)

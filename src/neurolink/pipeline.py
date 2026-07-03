@@ -37,9 +37,6 @@ def run_pipeline(config_path: str | Path) -> None:
     if cfg.track in (TRACK_INDEX, TRACK_FULL):
         run_index(cfg.index_config, run_id)
 
-    if cfg.track in (TRACK_CENTROID, TRACK_FULL):
-        run_centroid_forecast(cfg.forecast_centroid_config, run_id)
-
     if cfg.track in (TRACK_LITERATURE, TRACK_FULL):
         run_literature_forecast(cfg.forecast_literature_config, run_id)
 

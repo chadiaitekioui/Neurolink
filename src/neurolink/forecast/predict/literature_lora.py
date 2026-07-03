@@ -17,36 +17,53 @@ logger = logging.getLogger(__name__)
 class LiteratureLoraConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
     adapter_dir: str = "data/models/literature"
-    max_context_questions: int = 25
-    lora_r: int = 8
-    lora_alpha: int = 16
+    max_context_questions: int = 40
+    lora_r: int = 16
+    lora_alpha: int = 32
     use_4bit: bool = True
     backend: str = "lora"
     train_epochs: int = 1
-    train_lr: float = 2e-4
-    max_examples_per_year: int = 25
+    train_lr: float = 1e-4
+    train_fraction: float = 0.7
+    max_examples_per_year: int = 0  # 0 = no cap; train_fraction applies
     error_train_epochs: int = 2
     error_max_examples: int = 50
     semantic_threshold: float = 0.55
     error_critical_only: bool = True
+    braingpt_adapter: str = "BrainGPT/BrainGPT-7B-v0.2"
+    benchmark_lora_year_max: int | None = None  # compare: fixed LoRA adapter for all benchmark years
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
 
 def _questions_by_year(conn: sqlite3.Connection, year_max: int) -> dict[int, list[str]]:
     rows = conn.execute(
         """
-        SELECT DISTINCT question_text, year FROM questions
+        SELECT question_text, year, impact_score FROM questions
         WHERE year IS NOT NULL AND year <= ?
-        ORDER BY year, question_text
         """,
         (year_max,),
     ).fetchall()
-    by_year: dict[int, list[str]] = {}
+    buckets: dict[int, list[tuple[float, str]]] = {}
     for r in rows:
-        text = r["question_text"].strip()
-        if text:
-            by_year.setdefault(int(r["year"]), []).append(text)
+        text = (r["question_text"] or "").strip()
+        if not text:
+            continue
+        yr = int(r["year"])
+        buckets.setdefault(yr, []).append((float(r["impact_score"] or 0), text))
+    by_year: dict[int, list[str]] = {}
+    for yr, items in buckets.items():
+        items.sort(key=lambda x: (-x[0], x[1]))
+        by_year[yr] = [text for _, text in items]
     return by_year
+
+
+def _training_examples_for_year(questions: list[str], cfg: LiteratureLoraConfig) -> list[str]:
+    if not questions:
+        return []
+    n_use = max(1, int(len(questions) * cfg.train_fraction))
+    if cfg.max_examples_per_year > 0:
+        n_use = min(n_use, cfg.max_examples_per_year)
+    return questions[:n_use]
 
 
 def build_context_summary(conn: sqlite3.Connection, N: int, max_q: int) -> str:
@@ -107,7 +124,7 @@ def build_temporal_examples(
         if year + 1 > year_max:
             break
         prompt = build_temporal_training_prompt(conn, year, cfg)
-        for q in by_year.get(year + 1, [])[: cfg.max_examples_per_year]:
+        for q in _training_examples_for_year(by_year.get(year + 1, []), cfg):
             examples.append((prompt, q[:400]))
     return examples
 
@@ -225,6 +242,37 @@ def _adapter_path(cfg: LiteratureLoraConfig, year_max: int) -> Path:
 
 def adapter_exists(cfg: LiteratureLoraConfig, year_max: int) -> bool:
     return (_adapter_path(cfg, year_max) / "lora").exists()
+
+
+def list_saved_lora_year_max(cfg: LiteratureLoraConfig) -> list[int]:
+    """year_max values with a saved LoRA adapter under adapter_dir."""
+    root = Path(cfg.adapter_dir)
+    if not root.is_dir():
+        return []
+    years: list[int] = []
+    for path in root.iterdir():
+        if not path.is_dir() or not path.name.startswith("year_max_"):
+            continue
+        try:
+            year_max = int(path.name.removeprefix("year_max_"))
+        except ValueError:
+            continue
+        if adapter_exists(cfg, year_max):
+            years.append(year_max)
+    return sorted(years)
+
+
+def infer_benchmark_years(conn: sqlite3.Connection, lora_year_max: int) -> list[int]:
+    """Forecast years strictly after lora_year_max that have indexed questions."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT year FROM questions
+        WHERE year IS NOT NULL AND year > ?
+        ORDER BY year
+        """,
+        (lora_year_max,),
+    ).fetchall()
+    return [int(r["year"]) for r in rows]
 
 
 def _load_train_model(cfg: LiteratureLoraConfig, continue_from: Path | None):
@@ -400,35 +448,70 @@ def train_literature_lora_on_errors(
         return 0
 
 
-def predict_literature_lora(
-    conn: sqlite3.Connection,
-    N: int,
-    k: int,
+def resolve_literature_llm_cfg(
     cfg: LiteratureLoraConfig,
-) -> list[tuple[str, float]]:
-    """Generate novel questions for year N (LoRA adapter trained on ≤ N−1 if available)."""
-    year_max = N - 1
-    prompt = build_generation_prompt(conn, N, cfg)
-
-    lora_dir = _adapter_path(cfg, year_max) / "lora"
+    year_max: int,
+    model: str,
+) -> CausalLMConfig:
+    """Build CausalLMConfig for literature_lora, mistral_base, or braingpt."""
     llm_cfg = CausalLMConfig(
         base_model=cfg.base_model,
-        adapter_path=str(lora_dir) if lora_dir.exists() else None,
         use_4bit=cfg.use_4bit,
         max_new_tokens=cfg.llm.max_new_tokens,
         temperature=cfg.llm.temperature,
         top_p=cfg.llm.top_p,
     )
+    if model == "literature_lora":
+        adapter_year = (
+            cfg.benchmark_lora_year_max
+            if cfg.benchmark_lora_year_max is not None
+            else year_max
+        )
+        lora_dir = _adapter_path(cfg, adapter_year) / "lora"
+        if lora_dir.exists():
+            llm_cfg.adapter_path = str(lora_dir)
+            if cfg.benchmark_lora_year_max is not None:
+                logger.info(
+                    "Benchmark LoRA adapter year_max_%d (predict year uses literature ≤ N−1)",
+                    adapter_year,
+                )
+        else:
+            logger.warning(
+                "No local LoRA adapter for year_max=%d — falling back to base Mistral",
+                adapter_year,
+            )
+    elif model == "braingpt":
+        llm_cfg.adapter_path = cfg.braingpt_adapter
+        logger.info("Using BrainGPT adapter: %s", cfg.braingpt_adapter)
+    elif model == "mistral_base":
+        logger.info("Using base Mistral (no adapter)")
+    else:
+        logger.warning("Unknown literature LM %r — base Mistral only", model)
+    return llm_cfg
+
+
+def predict_literature_lm(
+    conn: sqlite3.Connection,
+    N: int,
+    k: int,
+    cfg: LiteratureLoraConfig,
+    *,
+    model: str = "literature_lora",
+) -> list[tuple[str, float]]:
+    """Generate novel questions for year N with a literature LM variant."""
+    year_max = N - 1
+    prompt = build_generation_prompt(conn, N, cfg)
+    llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
 
     try:
         return generate_questions(prompt, llm_cfg, k, oversample=3)
     except ImportError as e:
-        logger.error("literature_lora: %s — pip install -e '.[train]'", e)
+        logger.error("%s: %s — pip install -e '.[train]'", model, e)
         return []
 
 
-def make_literature_predictor(cfg: LiteratureLoraConfig):
+def make_literature_predictor(cfg: LiteratureLoraConfig, model: str = "literature_lora"):
     def _fn(conn: sqlite3.Connection, N: int, k: int, rng) -> list[tuple[str, float]]:
-        return predict_literature_lora(conn, N, k, cfg)
+        return predict_literature_lm(conn, N, k, cfg, model=model)
 
     return _fn

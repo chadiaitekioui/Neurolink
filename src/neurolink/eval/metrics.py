@@ -1,14 +1,15 @@
-"""Evaluation: P@k, R@k, semantic similarity, bootstrap."""
+"""Evaluation: TF-IDF P@k/R@k, BrainBench perplexity discrimination, LoRA contamination."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-
-import numpy as np
+from pathlib import Path
 
 from ..db import Database
 from ..utils.config import infer_test_years, load_config, make_run_id, resolve_path
+from .brainbench import run_brainbench_year
+from .contamination import run_contamination_audit
 from .matching import TfidfMatcher
 
 logger = logging.getLogger(__name__)
@@ -20,18 +21,47 @@ class EvalConfig:
     test_years: list[int] = field(default_factory=lambda: [2018, 2019, 2020, 2021, 2022, 2023, 2024])
     top_k: list[int] = field(default_factory=lambda: [10, 50])
     models: list[str] = field(
-        default_factory=lambda: ["random", "frequency", "literature_lora", "centroid_trajectory"]
+        default_factory=lambda: ["random", "frequency", "literature_lora"]
     )
     semantic_threshold: float = 0.55
     critical_only: bool = True
     run_id: str | None = None
+    predict_config: str = "config/forecast/predict_literature.yaml"
+    brainbench_enabled: bool = True
+    contamination_enabled: bool = True
+    brainbench_max_pairs: int = 50
+    contamination_corpus_sample: int = 200
+
+
+def _llm_cfg_for_model(lit_cfg, year_max: int, model: str):
+    from ..forecast.predict.literature_lora import resolve_literature_llm_cfg
+
+    return resolve_literature_llm_cfg(lit_cfg, year_max, model)
+
+
+def _append_metric(
+    rows: list[tuple],
+    *,
+    year: int,
+    model: str,
+    metric: str,
+    value: float,
+    eval_run: str,
+    k: int = 0,
+) -> None:
+    rows.append((year, model, metric, k, value, eval_run))
 
 
 def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
+    from ..forecast.predict.models import LLM_LITERATURE_MODELS, MODEL_LITERATURE_LORA, PredictConfig
+
     cfg = load_config(config_path, EvalConfig) if isinstance(config_path, str) else config_path
     db = Database(resolve_path(cfg.db_path))
     eval_run = run_id or make_run_id("eval")
     rows_to_insert: list[tuple] = []
+
+    predict_cfg = load_config(cfg.predict_config, PredictConfig)
+    lit_cfg = predict_cfg.literature
 
     with db.connect() as conn:
         test_years = infer_test_years(conn, cfg.test_years)
@@ -65,11 +95,88 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                 preds = [r["question_predicted"] for r in pred_rows]
                 if not preds or not refs:
                     continue
+
                 matcher = TfidfMatcher([r["text"] for r in refs], cfg.semantic_threshold)
                 for k in cfg.top_k:
                     p, r = matcher.precision_recall_at_k(preds, k)
-                    rows_to_insert.append((N, model, "precision@k", k, p, eval_run))
-                    rows_to_insert.append((N, model, "recall@k", k, r, eval_run))
+                    _append_metric(rows_to_insert, year=N, model=model, metric="precision@k", value=p, eval_run=eval_run, k=k)
+                    _append_metric(rows_to_insert, year=N, model=model, metric="recall@k", value=r, eval_run=eval_run, k=k)
+
+                if model not in LLM_LITERATURE_MODELS:
+                    continue
+
+                year_max = N - 1
+                if lit_cfg.benchmark_lora_year_max is not None:
+                    year_max = lit_cfg.benchmark_lora_year_max
+                llm_cfg = _llm_cfg_for_model(lit_cfg, year_max, model)
+
+                if cfg.brainbench_enabled:
+                    bb = run_brainbench_year(
+                        conn, N, lit_cfg, llm_cfg, max_pairs=cfg.brainbench_max_pairs
+                    )
+                    if bb:
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="brainbench_accuracy",
+                            value=bb.accuracy, eval_run=eval_run,
+                        )
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="brainbench_confidence",
+                            value=bb.mean_confidence, eval_run=eval_run,
+                        )
+                        logger.info(
+                            "BrainBench %d: accuracy=%.3f confidence=%.3f (n=%d)",
+                            N, bb.accuracy, bb.mean_confidence, bb.n_pairs,
+                        )
+
+                if cfg.contamination_enabled:
+                    report = run_contamination_audit(
+                        conn,
+                        target_year=N,
+                        year_max=year_max,
+                        predictions=preds,
+                        lit_cfg=lit_cfg,
+                        llm_cfg=llm_cfg,
+                        semantic_threshold=cfg.semantic_threshold,
+                        corpus_sample_size=cfg.contamination_corpus_sample,
+                        include_train_overlap=(model == MODEL_LITERATURE_LORA),
+                    )
+                    if report:
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="contamination_corpus_recycling",
+                            value=report.corpus_recycling_rate, eval_run=eval_run,
+                        )
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="contamination_train_eval_overlap",
+                            value=report.train_eval_overlap_rate, eval_run=eval_run,
+                        )
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="contamination_verbatim_recycling",
+                            value=report.verbatim_recycling_rate, eval_run=eval_run,
+                        )
+                        if report.zlib_ppl_pred_mean is not None:
+                            _append_metric(
+                                rows_to_insert, year=N, model=model, metric="contamination_zlib_ppl_pred_mean",
+                                value=report.zlib_ppl_pred_mean, eval_run=eval_run,
+                            )
+                        if report.zlib_ppl_pred_high_rate is not None:
+                            _append_metric(
+                                rows_to_insert, year=N, model=model, metric="contamination_zlib_ppl_pred_high_rate",
+                                value=report.zlib_ppl_pred_high_rate, eval_run=eval_run,
+                            )
+                        if report.zlib_ppl_train_mean is not None:
+                            _append_metric(
+                                rows_to_insert, year=N, model=model, metric="contamination_zlib_ppl_train_mean",
+                                value=report.zlib_ppl_train_mean, eval_run=eval_run,
+                            )
+                        logger.info(
+                            "Contamination %d: corpus_recycling=%.3f train_eval_overlap=%.3f "
+                            "verbatim=%.3f zlib_ppl_pred_high=%s",
+                            N,
+                            report.corpus_recycling_rate,
+                            report.train_eval_overlap_rate,
+                            report.verbatim_recycling_rate,
+                            f"{report.zlib_ppl_pred_high_rate:.3f}" if report.zlib_ppl_pred_high_rate is not None else "n/a",
+                        )
 
     with db.connect() as conn:
         for N, model, metric, k, val, er in rows_to_insert:
@@ -89,7 +196,7 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
     return n
 
 
-def write_summary(db: Database, run_id: str, path) -> None:
+def write_summary(db: Database, run_id: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with db.connect() as conn:
         rows = conn.execute(
@@ -100,8 +207,17 @@ def write_summary(db: Database, run_id: str, path) -> None:
             """,
             (run_id,),
         ).fetchall()
-    lines = ["# Pipeline evaluation\n", f"run_id: `{run_id}`\n\n", "| Year | Model | Metric | k | Value |\n", "|------|-------|--------|---|-------|\n"]
+    lines = [
+        "# Pipeline evaluation\n",
+        f"run_id: `{run_id}`\n\n",
+        "Metrics follow Luo et al. (2025) BrainBench where noted: "
+        "paired perplexity discrimination (`brainbench_*`) and "
+        "zlib–perplexity memorization ratios (`contamination_zlib_ppl_*`).\n\n",
+        "| Year | Model | Metric | k | Value |\n",
+        "|------|-------|--------|---|-------|\n",
+    ]
     for r in rows:
-        lines.append(f"| {r['target_year']} | {r['model']} | {r['metric']} | {r['k']} | {r['value']:.3f} |\n")
+        k_display = r["k"] if r["k"] else "—"
+        lines.append(f"| {r['target_year']} | {r['model']} | {r['metric']} | {k_display} | {r['value']:.3f} |\n")
     path.write_text("".join(lines), encoding="utf-8")
     logger.info("Report: %s", path)

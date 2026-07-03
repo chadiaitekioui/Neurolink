@@ -17,7 +17,15 @@ logger = logging.getLogger(__name__)
 MODEL_RANDOM = "random"
 MODEL_FREQUENCY = "frequency"
 MODEL_LITERATURE_LORA = "literature_lora"
+MODEL_MISTRAL_BASE = "mistral_base"
+MODEL_BRAINGPT = "braingpt"
 MODEL_CENTROID_TRAJECTORY = "centroid_trajectory"
+
+LLM_LITERATURE_MODELS = frozenset({
+    MODEL_LITERATURE_LORA,
+    MODEL_MISTRAL_BASE,
+    MODEL_BRAINGPT,
+})
 
 
 @dataclass
@@ -69,7 +77,9 @@ def _build_predictors(cfg: PredictConfig) -> dict:
             _context_questions(conn, N - 1), k, rng
         ),
         MODEL_FREQUENCY: lambda conn, N, k, rng: predict_frequency(conn, N, k),
-        MODEL_LITERATURE_LORA: make_literature_predictor(cfg.literature),
+        MODEL_LITERATURE_LORA: make_literature_predictor(cfg.literature, MODEL_LITERATURE_LORA),
+        MODEL_MISTRAL_BASE: make_literature_predictor(cfg.literature, MODEL_MISTRAL_BASE),
+        MODEL_BRAINGPT: make_literature_predictor(cfg.literature, MODEL_BRAINGPT),
         MODEL_CENTROID_TRAJECTORY: make_centroid_predictor(cfg.centroid),
     }
 

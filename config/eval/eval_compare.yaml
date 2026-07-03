@@ -3,9 +3,11 @@ test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
 top_k: [10, 50]
 models:
   - literature_lora
+  - mistral_base
+  - braingpt
 semantic_threshold: 0.55
 critical_only: false
-predict_config: config/forecast/predict_literature.yaml
+predict_config: config/forecast/predict_compare.yaml
 brainbench_enabled: true
 contamination_enabled: true
 brainbench_max_pairs: 50

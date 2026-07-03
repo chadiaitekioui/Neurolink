@@ -24,11 +24,11 @@ EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 class CollectConfig:
     db_path: str = "data/neurolink.db"
     mesh: str = "Neurosciences"
-    term: str | None = None
-    year_from: int = 2010
+    term: str | None = "cortex neuroscience"
+    year_from: int = 2000
     year_to: int = 2025
     exclude_reviews: bool = True
-    retmax: int = 500
+    retmax: int = 60000
     batch_size: int = 200
     email: str | None = None
     delay_seconds: float = 0.34

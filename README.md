@@ -1,12 +1,10 @@
 # Neurolink
 
-Modular pipeline to forecast emergent neuroscience research directions from PubMed literature using two approaches:
+Modular pipeline to forecast emergent neuroscience research directions from PubMed literature.
 
-**1 - Centroid trajectory**: neuroscience topics are centroids; research questions are points in their clusters.
+**Literature LoRA**: fine-tune Mistral-7B on temporal question pairs, with optional benchmark against Mistral-7B base and BrainGPT.
 
-**2 - Literature LoRA**: fine-tune Mistral-7B on temporal question pairs.
-
-![image](neurolink.png)
+image
 
 ## Installation
 
@@ -22,38 +20,29 @@ source .venv/bin/activate
 
 ```bash
 pip install -e .
-# optional: Centroid trajectory
-# pip install -e ".[ml]"
 # optional: LoRA training
 # pip install -e ".[train]"
 ```
 
-**CLI**
+**CLI / menu**
 
 ```bash
 python -m neurolink menu
 ```
 
-![image](CLI.png)
+image
 
-**Two approaches**
+Menu: **Index → LoRA → Benchmark → Status**.
 
-**Literature LoRA approach** (`literature_lora`)
+## Literature LoRA
 
-- `train_literature` : fine-tune LoRA on pairs context ≤ T → questions at T+1.
-- `predict` : prompt with top questions ≤ N−1 → generate novel questions for N.
-- Code: `forecast/predict/literature_lora.py`, `forecast/train.py`.
-
-**Centroid approach** (`centroid_trajectory`)
-
-- `topics` : multi-year trajectories per theme track.
-- `predict` : LLM generates questions from trajectory signals.
-- Code: `forecast/predict/centroid_trajectory.py`, `forecast/topics.py`.
-
-**Literature LoRA — train vs predict**
+- `train-literature` : fine-tune LoRA on pairs context ≤ T → questions at T+1.
+- `predict` / `literature` : prompt with top questions ≤ N−1 → generate novel questions for N.
+- `compare` : benchmark `literature_lora`, `mistral_base`, `braingpt` on years after a saved LoRA `year_max`.
+- Code: `forecast/predict/literature_lora.py`, `forecast/train.py`, `forecast/benchmark.py`.
 
 The LoRA adapter is saved locally under `data/models/literature/year_max_*/lora/`.
-Inference can run **without retraining**:
+Inference can run **without retraining** when the adapter for `year_max_{N-1}` exists.
 
 ```bash
 # Train once
@@ -69,7 +58,7 @@ Train and predict in one command: `config/forecast/pipeline_literature_train.yam
 
 TF-IDF semantic matching between generated predictions and ground-truth questions for year N.
 
-Metrics: precision@k, recall@k.
+Metrics: precision@k, recall@k, BrainBench-style perplexity discrimination, LoRA contamination audit.
 
 ## Reference
 

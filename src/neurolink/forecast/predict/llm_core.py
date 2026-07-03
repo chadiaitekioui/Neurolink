@@ -96,6 +96,21 @@ def score_completion(prompt: str, completion: str, cfg: CausalLMConfig) -> float
         return -float(out.loss.item())
 
 
+def sequence_perplexity(text: str, cfg: CausalLMConfig, *, max_length: int = 2048) -> float:
+    """Token-sequence perplexity (BrainBench eq. 1): exp(mean negative log-likelihood)."""
+    import math
+
+    import torch
+
+    model, tokenizer = _load_model(cfg)
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
+    if not cfg.use_4bit:
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    with torch.no_grad():
+        out = model(**inputs, labels=inputs["input_ids"])
+    return math.exp(float(out.loss.item()))
+
+
 def generate_questions(
     prompt: str,
     cfg: CausalLMConfig,

@@ -10,10 +10,8 @@ from ..db import Database
 from ..eval import run_eval
 from ..forecast import (
     PredictConfig,
-    run_centroid_forecast,
     run_literature_forecast,
     run_predict,
-    run_topics,
     run_train_literature,
     run_train_literature_errors,
 )
@@ -86,10 +84,6 @@ def cmd_index(args: argparse.Namespace) -> None:
         run_index(cfg)
 
 
-def cmd_topics(args: argparse.Namespace) -> None:
-    run_topics(args.config, target_year=args.year)
-
-
 def cmd_predict(args: argparse.Namespace) -> None:
     run_predict(args.config)
 
@@ -107,12 +101,24 @@ def cmd_train_literature_errors(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_centroid(args: argparse.Namespace) -> None:
-    run_centroid_forecast(args.config)
-
-
 def cmd_literature(args: argparse.Namespace) -> None:
     run_literature_forecast(args.config)
+
+
+def cmd_compare(args: argparse.Namespace) -> None:
+    """Run LLM benchmark (literature_lora vs mistral_base vs braingpt)."""
+    from ..forecast import run_benchmark
+
+    run_id, anchor, years = run_benchmark(
+        args.config,
+        lora_year_max=args.lora_year_max,
+    )
+    logger.info(
+        "Benchmark finished run_id=%s anchor_year_max=%d years=%s",
+        run_id,
+        anchor,
+        years,
+    )
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
@@ -192,11 +198,6 @@ def main(argv: list[str] | None = None) -> None:
     idx.add_argument("--cpu", action="store_true", help="Force CPU for segment (overrides --device)")
     idx.set_defaults(func=cmd_index)
 
-    top = sub.add_parser("topics", help="Dynamic topics and emergence scores")
-    top.add_argument("--config", default="config/forecast/topics.yaml")
-    top.add_argument("--year", type=int, default=None)
-    top.set_defaults(func=cmd_topics)
-
     pr = sub.add_parser("predict", help="Generate predictions")
     pr.add_argument("--config", default="config/forecast/predict.yaml")
     pr.set_defaults(func=cmd_predict)
@@ -216,13 +217,22 @@ def main(argv: list[str] | None = None) -> None:
     tre.add_argument("--eval-k", type=int, default=None)
     tre.set_defaults(func=cmd_train_literature_errors)
 
-    cent = sub.add_parser("centroid", help="Run centroid forecast track")
-    cent.add_argument("--config", default="config/forecast/pipeline_centroid.yaml")
-    cent.set_defaults(func=cmd_centroid)
-
     lit = sub.add_parser("literature", help="Run literature forecast track")
     lit.add_argument("--config", default="config/forecast/pipeline_literature.yaml")
     lit.set_defaults(func=cmd_literature)
+
+    cmp = sub.add_parser(
+        "compare",
+        help="Benchmark literature_lora, mistral_base, braingpt after a saved LoRA year_max",
+    )
+    cmp.add_argument("--config", default="config/forecast/predict_compare.yaml")
+    cmp.add_argument(
+        "--lora-year-max",
+        type=int,
+        default=None,
+        help="LoRA anchor year_max (default: latest saved adapter)",
+    )
+    cmp.set_defaults(func=cmd_compare)
 
     ev = sub.add_parser("eval", help="Evaluate predictions")
     ev.add_argument("--config", default="config/eval/eval.yaml")
@@ -233,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
     rn.set_defaults(func=cmd_run)
 
     sub.add_parser("status", help="SQLite table row counts").set_defaults(func=cmd_status)
-    sub.add_parser("menu", help="Interactive menu (index / literature / centroid)").set_defaults(func=cmd_menu)
+    sub.add_parser("menu", help="Interactive menu (index / LoRA / benchmark)").set_defaults(func=cmd_menu)
 
     args = p.parse_args(argv)
     args.func(args)
