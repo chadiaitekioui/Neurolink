@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from ..db import Database
 from ..utils.pubmed_clean import Bucket, is_junk_sentence, polish_segment_field, structure_abstract
 from ..utils.config import load_config, make_run_id, resolve_path
+from ..utils.torch_device import resolve_torch_device
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class SegmentConfig:
     pubmedbert_model: str = (
         "ml4pubmed/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext_pub_section"
     )
+    device: str = "cpu"  # cpu | cuda | auto (auto: use CUDA when available)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -39,19 +41,27 @@ def _split_sentences(text: str) -> list[str]:
     ]
 
 
-def _load_pubmedbert(model_name: str):
+def _load_pubmedbert(model_name: str, device: str):
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    model.to(device)
     model.eval()
     return tokenizer, model, model.config.id2label
 
 
-def _bert_bucket(sentence: str, tokenizer, model, id2label: dict[int, str]) -> Bucket | None:
+def _bert_bucket(
+    sentence: str,
+    tokenizer,
+    model,
+    id2label: dict[int, str],
+    device: str,
+) -> Bucket | None:
     import torch
 
     inputs = tokenizer(sentence, return_tensors="pt", truncation=True, max_length=512)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         logits = model(**inputs).logits
     label = id2label[int(logits.argmax(-1))]
@@ -63,6 +73,7 @@ def segment_abstract(
     tokenizer,
     model,
     id2label: dict[int, str],
+    device: str,
 ) -> tuple[str, str]:
     """Rules split IMRaD sections; BERT classifies unstructured sentences."""
     question_parts: list[str] = []
@@ -75,7 +86,7 @@ def segment_abstract(
         for sent in _split_sentences(content):
             if is_junk_sentence(sent):
                 continue
-            bucket = _bert_bucket(sent, tokenizer, model, id2label)
+            bucket = _bert_bucket(sent, tokenizer, model, id2label, device)
             if bucket == "question":
                 question_parts.append(sent)
             elif bucket == "results":
@@ -85,7 +96,7 @@ def segment_abstract(
         for sent in _split_sentences(text):
             if is_junk_sentence(sent):
                 continue
-            bucket = _bert_bucket(sent, tokenizer, model, id2label)
+            bucket = _bert_bucket(sent, tokenizer, model, id2label, device)
             if bucket == "question":
                 question_parts.append(sent)
             elif bucket == "results":
@@ -101,9 +112,11 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
     run_id = run_id or make_run_id("segment")
     now = datetime.now(timezone.utc).isoformat()
 
+    device = resolve_torch_device(cfg.device)
+
     try:
-        pubmedbert = _load_pubmedbert(cfg.pubmedbert_model)
-        logger.info("PubMedBERT loaded: %s", cfg.pubmedbert_model)
+        tokenizer, model, id2label = _load_pubmedbert(cfg.pubmedbert_model, device)
+        logger.info("PubMedBERT loaded: %s (device=%s)", cfg.pubmedbert_model, device)
     except ImportError as e:
         raise ImportError(
             "segment requires transformers and torch — pip install -e ."
@@ -116,7 +129,7 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
         ).fetchall()
         for row in articles:
             text = (row["text_work"] or row["abstract"] or "").strip()
-            question, results = segment_abstract(text, *pubmedbert)
+            question, results = segment_abstract(text, tokenizer, model, id2label, device)
             conn.execute(
                 """
                 INSERT INTO article_segments (pmid, question, results, segmentation_method, qc_score, updated_at)

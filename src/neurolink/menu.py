@@ -40,6 +40,7 @@ from .index import (
     run_segment,
 )
 from .utils.config import available_question_years, load_config, make_run_id, resolve_path
+from .utils.torch_device import cuda_available, cuda_device_name
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +396,19 @@ def _configure_collect(cfg: CollectConfig) -> CollectConfig:
 def _configure_segment(cfg: SegmentConfig) -> SegmentConfig:
     console.print("\n[bold]Segment[/bold] (rules structure + PubMedBERT)")
     model = Prompt.ask("PubMedBERT model", default=cfg.pubmedbert_model)
-    return replace(cfg, pubmedbert_model=model)
+    device = cfg.device
+    if cuda_available():
+        gpu_name = cuda_device_name()
+        label = f" ({gpu_name})" if gpu_name else ""
+        use_gpu = Confirm.ask(
+            f"Use CUDA GPU for PubMedBERT{label}?",
+            default=cfg.device == "cuda",
+        )
+        device = "cuda" if use_gpu else "cpu"
+    else:
+        console.print("[dim]No CUDA GPU detected — PubMedBERT will run on CPU.[/dim]")
+        device = "cpu"
+    return replace(cfg, pubmedbert_model=model, device=device)
 
 
 def _configure_impact(cfg: ImpactConfig) -> ImpactConfig:
@@ -445,12 +458,20 @@ def _show_collect_summary(cfg: CollectConfig) -> None:
 
 
 def _show_segment_summary(cfg: SegmentConfig) -> None:
+    device_label = cfg.device
+    if cfg.device == "cuda" and cuda_available():
+        gpu_name = cuda_device_name()
+        if gpu_name:
+            device_label = f"cuda ({gpu_name})"
+    elif cfg.device == "auto":
+        device_label = "auto (CUDA if available)"
     _show_params_table(
         "segment",
         [
             ("Database", cfg.db_path),
             ("Method", "rules + PubMedBERT"),
             ("PubMedBERT model", cfg.pubmedbert_model),
+            ("Device", device_label),
         ],
     )
 

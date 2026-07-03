@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import replace
 
 from ..db import Database
 from ..eval import run_eval
@@ -18,6 +19,7 @@ from ..forecast import (
 )
 from ..index import (
     CollectConfig,
+    SegmentConfig,
     import_pubmed_text_file,
     run_collect,
     run_embed,
@@ -36,6 +38,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _segment_config_for_cli(config_path: str, device: str | None = None) -> SegmentConfig:
+    """Load segment config; CLI defaults to auto CUDA detection unless overridden."""
+    cfg = load_config(config_path, SegmentConfig)
+    if device is not None:
+        return replace(cfg, device=device)
+    return replace(cfg, device="auto")
+
+
 def cmd_init_db(args: argparse.Namespace) -> None:
     db = Database(resolve_path(args.db))
     db.init_schema()
@@ -52,7 +62,8 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
 
 def cmd_segment(args: argparse.Namespace) -> None:
-    run_segment(args.config)
+    device = "cpu" if args.cpu else args.device
+    run_segment(_segment_config_for_cli(args.config, device=device))
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
@@ -64,7 +75,15 @@ def cmd_embed(args: argparse.Namespace) -> None:
 
 
 def cmd_index(args: argparse.Namespace) -> None:
-    run_index(args.config)
+    from ..index.pipeline import IndexPipelineConfig
+
+    device = "cpu" if args.cpu else args.device
+    cfg = load_config(args.config, IndexPipelineConfig)
+    if "segment" in cfg.stages:
+        segment_cfg = _segment_config_for_cli(cfg.segment_config, device=device)
+        run_index(replace(cfg, segment_config=segment_cfg))
+    else:
+        run_index(cfg)
 
 
 def cmd_topics(args: argparse.Namespace) -> None:
@@ -145,6 +164,13 @@ def main(argv: list[str] | None = None) -> None:
 
     seg = sub.add_parser("segment", help="Segment question / results")
     seg.add_argument("--config", default="config/index/segment.yaml")
+    seg.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default=None,
+        help="Torch device (default: auto-detect CUDA)",
+    )
+    seg.add_argument("--cpu", action="store_true", help="Force CPU (overrides --device)")
     seg.set_defaults(func=cmd_segment)
 
     impc = sub.add_parser("impact", help="OpenAlex citations + impact labels")
@@ -157,6 +183,13 @@ def main(argv: list[str] | None = None) -> None:
 
     idx = sub.add_parser("index", help="Run index layer (collect → embed)")
     idx.add_argument("--config", default="config/index/pipeline.yaml")
+    idx.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default=None,
+        help="Torch device for segment stage (default: auto-detect CUDA)",
+    )
+    idx.add_argument("--cpu", action="store_true", help="Force CPU for segment (overrides --device)")
     idx.set_defaults(func=cmd_index)
 
     top = sub.add_parser("topics", help="Dynamic topics and emergence scores")
