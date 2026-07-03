@@ -1,4 +1,4 @@
-"""Causal LM question generation (shared by literature and centroid predictors)."""
+"""Causal LM question generation for literature predictors."""
 
 from __future__ import annotations
 

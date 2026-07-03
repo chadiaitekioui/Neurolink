@@ -1,8 +1,0 @@
-# Centroid-only pipeline (deferred track — not exposed in CLI/menu).
-# Requires index + embeddings first, then topics → predict → eval.
-track: centroid
-db_path: data/neurolink.db
-index_config: config/index/pipeline.yaml
-forecast_centroid_config: config/forecast/pipeline_centroid.yaml
-forecast_literature_config: config/forecast/pipeline_literature.yaml
-eval_config: config/eval/eval_centroid.yaml

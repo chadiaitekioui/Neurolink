@@ -140,8 +140,6 @@ def cmd_status(args: argparse.Namespace) -> None:
             "articles",
             "article_segments",
             "questions",
-            "topic_centroid_snapshots",
-            "topic_dynamics",
             "predictions",
             "evaluations",
         ]

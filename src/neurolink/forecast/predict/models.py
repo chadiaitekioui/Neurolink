@@ -1,4 +1,4 @@
-"""Temporal prediction — literature vs centroid approaches + baselines."""
+"""Temporal prediction — literature LLMs + baselines."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 
 from ...db import Database
 from ...utils.config import infer_test_years, load_config, make_run_id, resolve_path
-from .centroid_trajectory import CentroidTrajectoryConfig, make_centroid_predictor
 from .literature_lora import LiteratureLoraConfig, make_literature_predictor
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,6 @@ MODEL_FREQUENCY = "frequency"
 MODEL_LITERATURE_LORA = "literature_lora"
 MODEL_MISTRAL_BASE = "mistral_base"
 MODEL_BRAINGPT = "braingpt"
-MODEL_CENTROID_TRAJECTORY = "centroid_trajectory"
 
 LLM_LITERATURE_MODELS = frozenset({
     MODEL_LITERATURE_LORA,
@@ -38,12 +36,10 @@ class PredictConfig:
             MODEL_RANDOM,
             MODEL_FREQUENCY,
             MODEL_LITERATURE_LORA,
-            MODEL_CENTROID_TRAJECTORY,
         ]
     )
     seed: int = 42
     literature: LiteratureLoraConfig = field(default_factory=LiteratureLoraConfig)
-    centroid: CentroidTrajectoryConfig = field(default_factory=CentroidTrajectoryConfig)
 
 
 def _context_questions(conn, year_max: int) -> list[str]:
@@ -80,7 +76,6 @@ def _build_predictors(cfg: PredictConfig) -> dict:
         MODEL_LITERATURE_LORA: make_literature_predictor(cfg.literature, MODEL_LITERATURE_LORA),
         MODEL_MISTRAL_BASE: make_literature_predictor(cfg.literature, MODEL_MISTRAL_BASE),
         MODEL_BRAINGPT: make_literature_predictor(cfg.literature, MODEL_BRAINGPT),
-        MODEL_CENTROID_TRAJECTORY: make_centroid_predictor(cfg.centroid),
     }
 
 

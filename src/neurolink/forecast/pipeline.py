@@ -1,4 +1,4 @@
-"""Forecast layer orchestration (centroid or literature track)."""
+"""Forecast layer orchestration (literature track)."""
 
 from __future__ import annotations
 
@@ -6,16 +6,9 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..db import Database
 from ..index.pipeline import check_index_ready
 from ..utils.config import load_config, make_run_id, resolve_path
-from .predict.models import (
-    MODEL_CENTROID_TRAJECTORY,
-    MODEL_LITERATURE_LORA,
-    PredictConfig,
-    run_predict,
-)
-from .topics import run_topics
+from .predict.models import MODEL_LITERATURE_LORA, PredictConfig, run_predict
 from .train import (
     check_literature_adapter,
     infer_year_max,
@@ -25,15 +18,13 @@ from .train import (
 
 logger = logging.getLogger(__name__)
 
-CENTROID_STAGES = ("topics", "predict")
 LITERATURE_STAGES = ("train_literature", "predict")
 
 
 @dataclass
 class ForecastPipelineConfig:
-    track: str = "centroid"  # centroid | literature
+    track: str = "literature"
     db_path: str = "data/neurolink.db"
-    topics_config: str = "config/forecast/topics.yaml"
     predict_config: str = "config/forecast/predict_literature.yaml"
     year_max: int | None = None
     error_target_year: int | None = None
@@ -44,43 +35,7 @@ class ForecastPipelineConfig:
 def _resolve_stages(cfg: ForecastPipelineConfig) -> list[str]:
     if cfg.stages:
         return cfg.stages
-    return (
-        list(CENTROID_STAGES)
-        if cfg.track == "centroid"
-        else list(LITERATURE_STAGES)
-    )
-
-
-def check_centroid_ready(db_path: str | Path) -> None:
-    db = Database(resolve_path(db_path))
-    with db.connect() as conn:
-        n = conn.execute("SELECT COUNT(*) FROM topic_centroid_snapshots").fetchone()[0]
-    if n == 0:
-        raise RuntimeError(
-            "Centroid forecast not ready: no topic snapshots. Run topics stage first."
-        )
-
-
-def run_centroid_forecast(config_path: str | Path, run_id: str | None = None) -> str:
-    cfg = load_config(config_path, ForecastPipelineConfig)
-    stages = _resolve_stages(cfg)
-    if cfg.track != "centroid":
-        raise ValueError(f"Expected track=centroid, got {cfg.track!r}")
-    check_index_ready(cfg.db_path)
-    run_id = run_id or make_run_id("forecast_centroid")
-    logger.info("Forecast centroid run_id=%s", run_id)
-
-    if "topics" in stages:
-        run_topics(cfg.topics_config, run_id=run_id)
-
-    if "predict" in stages:
-        check_centroid_ready(cfg.db_path)
-        predict_cfg = load_config(cfg.predict_config, PredictConfig)
-        predict_cfg.models = [MODEL_CENTROID_TRAJECTORY]
-        run_predict(predict_cfg, run_id)
-
-    logger.info("Forecast centroid finished.")
-    return run_id
+    return list(LITERATURE_STAGES)
 
 
 def run_literature_forecast(config_path: str | Path, run_id: str | None = None) -> str:

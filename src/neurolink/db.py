@@ -65,90 +65,15 @@ CREATE TABLE IF NOT EXISTS questions (
     is_critical INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS topic_tracks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    track_label TEXT NOT NULL,
-    first_seen_year INTEGER,
-    birth_target_year INTEGER,
-    last_seen_year INTEGER,
-    centroid BLOB,
-    run_id TEXT REFERENCES runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS topics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    topic_label TEXT,
-    track_id INTEGER REFERENCES topic_tracks(id),
-    year INTEGER,
-    count INTEGER,
-    representative_terms TEXT,
-    run_id TEXT REFERENCES runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS topic_emergence (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    topic_id INTEGER REFERENCES topics(id),
-    track_id INTEGER REFERENCES topic_tracks(id),
-    target_year INTEGER,
-    growth_rate REAL,
-    novelty_score REAL,
-    atypicality_score REAL,
-    semantic_shift REAL,
-    emergence_score REAL,
-    run_id TEXT REFERENCES runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS topic_track_yearly (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    track_id INTEGER REFERENCES topic_tracks(id),
-    calendar_year INTEGER NOT NULL,
-    target_year INTEGER NOT NULL,
-    count INTEGER NOT NULL,
-    run_id TEXT REFERENCES runs(run_id),
-    UNIQUE(track_id, calendar_year, target_year, run_id)
-);
-
-CREATE TABLE IF NOT EXISTS topic_centroid_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    track_id INTEGER REFERENCES topic_tracks(id),
-    target_year INTEGER NOT NULL,
-    centroid BLOB NOT NULL,
-    velocity BLOB,
-    micro_count INTEGER,
-    run_id TEXT REFERENCES runs(run_id),
-    UNIQUE(track_id, target_year, run_id)
-);
-
-CREATE TABLE IF NOT EXISTS topic_dynamics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    track_id_a INTEGER REFERENCES topic_tracks(id),
-    track_id_b INTEGER REFERENCES topic_tracks(id),
-    target_year INTEGER NOT NULL,
-    proximity REAL,
-    convergence REAL,
-    fusion_score REAL,
-    run_id TEXT REFERENCES runs(run_id),
-    UNIQUE(track_id_a, track_id_b, target_year, run_id)
-);
-
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_year INTEGER,
     model TEXT,
     rank INTEGER,
     question_predicted TEXT,
-    topic_id INTEGER,
     score REAL,
     run_id TEXT REFERENCES runs(run_id),
     created_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS question_topics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    question_id INTEGER REFERENCES questions(id),
-    topic_id INTEGER REFERENCES topics(id),
-    target_year INTEGER,
-    run_id TEXT REFERENCES runs(run_id)
 );
 
 CREATE TABLE IF NOT EXISTS evaluations (
@@ -197,64 +122,6 @@ class Database:
     def init_schema(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
-            self._migrate_schema(conn)
-
-    @staticmethod
-    def _migrate_schema(conn: sqlite3.Connection) -> None:
-        """Add dynamic-topic columns/tables when upgrading older databases."""
-        topic_cols = {row[1] for row in conn.execute("PRAGMA table_info(topics)")}
-        if "track_id" not in topic_cols:
-            conn.execute("ALTER TABLE topics ADD COLUMN track_id INTEGER REFERENCES topic_tracks(id)")
-
-        emergence_cols = {row[1] for row in conn.execute("PRAGMA table_info(topic_emergence)")}
-        if "track_id" not in emergence_cols:
-            conn.execute("ALTER TABLE topic_emergence ADD COLUMN track_id INTEGER REFERENCES topic_tracks(id)")
-        if "semantic_shift" not in emergence_cols:
-            conn.execute("ALTER TABLE topic_emergence ADD COLUMN semantic_shift REAL")
-
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS topic_tracks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_label TEXT NOT NULL,
-                first_seen_year INTEGER,
-                birth_target_year INTEGER,
-                last_seen_year INTEGER,
-                centroid BLOB,
-                run_id TEXT REFERENCES runs(run_id)
-            );
-            CREATE TABLE IF NOT EXISTS topic_track_yearly (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id INTEGER REFERENCES topic_tracks(id),
-                calendar_year INTEGER NOT NULL,
-                target_year INTEGER NOT NULL,
-                count INTEGER NOT NULL,
-                run_id TEXT REFERENCES runs(run_id),
-                UNIQUE(track_id, calendar_year, target_year, run_id)
-            );
-            CREATE TABLE IF NOT EXISTS topic_centroid_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id INTEGER REFERENCES topic_tracks(id),
-                target_year INTEGER NOT NULL,
-                centroid BLOB NOT NULL,
-                velocity BLOB,
-                micro_count INTEGER,
-                run_id TEXT REFERENCES runs(run_id),
-                UNIQUE(track_id, target_year, run_id)
-            );
-            CREATE TABLE IF NOT EXISTS topic_dynamics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id_a INTEGER REFERENCES topic_tracks(id),
-                track_id_b INTEGER REFERENCES topic_tracks(id),
-                target_year INTEGER NOT NULL,
-                proximity REAL,
-                convergence REAL,
-                fusion_score REAL,
-                run_id TEXT REFERENCES runs(run_id),
-                UNIQUE(track_id_a, track_id_b, target_year, run_id)
-            );
-            """
-        )
 
     def upsert_articles(self, rows: Iterable[ArticleRow]) -> int:
         now = datetime.now(timezone.utc).isoformat()

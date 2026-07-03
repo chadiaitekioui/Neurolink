@@ -862,8 +862,6 @@ def _show_status() -> None:
         "articles",
         "article_segments",
         "questions",
-        "topic_centroid_snapshots",
-        "topic_dynamics",
         "predictions",
         "evaluations",
     ]
