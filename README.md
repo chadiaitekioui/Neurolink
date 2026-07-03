@@ -4,7 +4,7 @@ Modular pipeline to forecast emergent neuroscience research directions from PubM
 
 **Literature LoRA**: fine-tune Mistral-7B on temporal question pairs, with optional benchmark against Mistral-7B base and BrainGPT.
 
-image
+![image](neurolink.png)
 
 ## Installation
 
@@ -29,8 +29,6 @@ pip install -e .
 ```bash
 python -m neurolink menu
 ```
-
-image
 
 Menu: **Index → LoRA → Benchmark → Status**.
 
