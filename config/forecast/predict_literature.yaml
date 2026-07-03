@@ -1,5 +1,5 @@
 db_path: data/neurolink.db
-test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+test_years: [2023, 2024, 2025, 2026]
 top_k: [10, 50]
 models:
   - literature_lora
