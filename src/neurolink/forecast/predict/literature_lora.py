@@ -32,6 +32,8 @@ class LiteratureLoraConfig:
     error_critical_only: bool = True
     braingpt_adapter: str = "BrainGPT/BrainGPT-7B-v0.2"
     benchmark_lora_year_max: int | None = None  # compare: fixed LoRA adapter for all benchmark years
+    context_year_max: int | None = None  # override context horizon (default: target_year - 1)
+    training_prompt_k: int = 1  # k in training prompts (one completion per example)
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
 
@@ -66,7 +68,9 @@ def _training_examples_for_year(questions: list[str], cfg: LiteratureLoraConfig)
     return questions[:n_use]
 
 
-def build_context_summary(conn: sqlite3.Connection, N: int, max_q: int) -> str:
+def build_context_summary(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
+    """Top-impact questions published on or before context_year (recent window)."""
+    year_floor = max(context_year - 5, 0)
     rows = conn.execute(
         """
         SELECT question_text, impact_score, year FROM questions
@@ -74,32 +78,51 @@ def build_context_summary(conn: sqlite3.Connection, N: int, max_q: int) -> str:
         ORDER BY COALESCE(impact_score, 0) DESC, year DESC
         LIMIT ?
         """,
-        (N - 1, max(N - 5, 0), max_q),
+        (context_year, year_floor, max_q),
     ).fetchall()
     if not rows:
         rows = conn.execute(
             "SELECT question_text, impact_score, year FROM questions WHERE year <= ? LIMIT ?",
-            (N - 1, max_q),
+            (context_year, max_q),
         ).fetchall()
     lines = []
-    for r in rows:
+    for i, r in enumerate(rows, start=1):
         yr = r["year"] or "?"
-        lines.append(f"- [{yr}] {r['question_text'][:280]}")
+        lines.append(f"{i}. [{yr}] {r['question_text'][:280]}")
     return "\n".join(lines)
 
 
-def build_generation_prompt(conn: sqlite3.Connection, N: int, cfg: LiteratureLoraConfig) -> str:
-    context = build_context_summary(conn, N, cfg.max_context_questions)
+def resolve_context_year(target_year: int, cfg: LiteratureLoraConfig) -> int:
+    if cfg.context_year_max is not None:
+        return cfg.context_year_max
+    return target_year - 1
+
+
+def build_generation_prompt(
+    conn: sqlite3.Connection,
+    target_year: int,
+    cfg: LiteratureLoraConfig,
+    *,
+    k: int,
+    context_year: int | None = None,
+) -> str:
+    """Shared forecast prompt — identical for literature_lora, mistral_base, and braingpt."""
+    ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
+    context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
     return (
-        f"You are a neuroscience research forecaster.\n"
-        f"Literature and research questions published until year {N - 1}:\n"
+        "You are a neuroscience research forecaster.\n\n"
+        f"CONTEXT (research questions published until {ctx_year}, ranked by impact):\n"
         f"{context}\n\n"
-        f"Predict NOVEL research questions likely to be studied in {N}.\n"
-        f"Rules:\n"
-        f"- Do NOT copy verbatim questions from the list above.\n"
-        f"- Some may extend existing themes with new angles; others should be genuinely emergent.\n"
-        f"- Output one question per line, each ending with '?'.\n\n"
-        f"New research questions for {N}:\n"
+        f"TASK: Propose exactly {k} novel research questions likely to be studied in {target_year}.\n\n"
+        "CONSTRAINTS:\n"
+        "- Each question: one line, 20-200 words, must end with \"?\"\n"
+        f"- Number lines 1. through {k}. only\n"
+        "- Do NOT copy or paraphrase closely any question from CONTEXT\n"
+        "- Mix extensions of existing themes and genuinely emergent directions\n\n"
+        "OUTPUT FORMAT (no preamble, no explanation):\n"
+        f"1. <question>?\n"
+        f"...\n"
+        f"{k}. <question>?\n"
     )
 
 
@@ -109,7 +132,14 @@ def build_temporal_training_prompt(
     cfg: LiteratureLoraConfig,
 ) -> str:
     """Training prompt aligned with inference format for year+1."""
-    return build_generation_prompt(conn, year + 1, cfg)
+    target = year + 1
+    return build_generation_prompt(
+        conn,
+        target,
+        cfg,
+        k=cfg.training_prompt_k,
+        context_year=year,
+    )
 
 
 def build_temporal_examples(
@@ -225,7 +255,9 @@ def build_error_examples(
         logger.info("All ground-truth questions covered for year %d — no error examples", target_year)
         return []
 
-    prompt = build_generation_prompt(conn, target_year, cfg)
+    prompt = build_generation_prompt(
+        conn, target_year, cfg, k=cfg.training_prompt_k
+    )
     examples = [(prompt, q[:400]) for q in missed[: cfg.error_max_examples]]
     logger.info(
         "Error examples for %d: %d missed / %d ground-truth",
@@ -460,6 +492,7 @@ def resolve_literature_llm_cfg(
         max_new_tokens=cfg.llm.max_new_tokens,
         temperature=cfg.llm.temperature,
         top_p=cfg.llm.top_p,
+        seed=cfg.llm.seed,
     )
     if model == "literature_lora":
         adapter_year = (
@@ -500,11 +533,13 @@ def predict_literature_lm(
 ) -> list[tuple[str, float]]:
     """Generate novel questions for year N with a literature LM variant."""
     year_max = N - 1
-    prompt = build_generation_prompt(conn, N, cfg)
+    context_year = resolve_context_year(N, cfg)
+    prompt = build_generation_prompt(conn, N, cfg, k=k, context_year=context_year)
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
 
     try:
-        return generate_questions(prompt, llm_cfg, k, oversample=3)
+        oversample = 1 if cfg.llm.temperature <= 0.0 else 3
+        return generate_questions(prompt, llm_cfg, k, oversample=oversample)
     except ImportError as e:
         logger.error("%s: %s — pip install -e '.[train]'", model, e)
         return []

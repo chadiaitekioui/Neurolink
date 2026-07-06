@@ -1,0 +1,13 @@
+# Eval LoRA-only predict 2026 (adapter year_max_2025).
+db_path: data/neurolink.db
+test_years: [2026]
+top_k: [10, 50]
+models:
+  - literature_lora
+semantic_threshold: 0.55
+critical_only: false
+predict_config: config/forecast/scenarios/predict_2026.yaml
+brainbench_enabled: true
+contamination_enabled: true
+brainbench_max_pairs: 50
+contamination_corpus_sample: 200

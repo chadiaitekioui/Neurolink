@@ -1,0 +1,6 @@
+# idr_module_search -f scripts/cluster/module_search.txt --arch v100
+torch>=2.0
+transformers>=4.40
+numpy>=1.24
+scipy>=1.11
+scikit-learn>=1.3

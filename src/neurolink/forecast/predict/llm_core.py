@@ -20,6 +20,7 @@ class CausalLMConfig:
     num_return_sequences: int = 1
     temperature: float = 0.7
     top_p: float = 0.9
+    seed: int = 42
 
 
 def _load_model(cfg: CausalLMConfig) -> tuple[object, object]:
@@ -127,16 +128,28 @@ def generate_questions(
     if not cfg.use_4bit:
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-    n_seq = min(max(n * oversample, n + 2), 8)
+    greedy = cfg.temperature <= 0.0
+    if greedy:
+        torch.manual_seed(cfg.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.seed)
+        n_seq = 1
+        gen_kwargs = {"do_sample": False}
+    else:
+        n_seq = min(max(n * oversample, n + 2), 8)
+        gen_kwargs = {
+            "do_sample": True,
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+        }
+
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=cfg.max_new_tokens * max(2, n // 2),
-            do_sample=True,
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
             num_return_sequences=n_seq,
             pad_token_id=tokenizer.pad_token_id,
+            **gen_kwargs,
         )
 
     candidates: list[str] = []

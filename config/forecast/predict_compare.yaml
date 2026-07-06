@@ -21,7 +21,9 @@ literature:
   error_max_examples: 50
   semantic_threshold: 0.55
   error_critical_only: true
+  training_prompt_k: 1
   llm:
     max_new_tokens: 96
-    temperature: 0.75
-    top_p: 0.9
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42

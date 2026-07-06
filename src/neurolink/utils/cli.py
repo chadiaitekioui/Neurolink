@@ -27,6 +27,7 @@ from ..index import (
 )
 from ..menu import run_menu
 from ..pipeline import run_pipeline
+from ..workflow import CompleteWorkflowConfig, run_complete_workflow
 from .config import load_config, make_run_id, resolve_path
 
 logging.basicConfig(
@@ -127,6 +128,17 @@ def cmd_eval(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     run_pipeline(args.config)
+
+
+def cmd_workflow(args: argparse.Namespace) -> None:
+    cfg = CompleteWorkflowConfig(
+        skip_index=args.skip_index,
+        segment_device="cpu" if args.cpu else args.device,
+        lora_anchor_first=args.lora_first,
+        lora_anchor_second=args.lora_second,
+        forecast_year=args.forecast_year,
+    )
+    run_complete_workflow(cfg)
 
 
 def cmd_menu(_args: argparse.Namespace) -> None:
@@ -231,6 +243,23 @@ def main(argv: list[str] | None = None) -> None:
         help="LoRA anchor year_max (default: latest saved adapter)",
     )
     cmp.set_defaults(func=cmd_compare)
+
+    wf = sub.add_parser(
+        "workflow",
+        help="Complete benchmark workflow: index → LoRA×2 → benchmark×2 → forecast (GPU)",
+    )
+    wf.add_argument("--skip-index", action="store_true", help="Skip index (already built)")
+    wf.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Torch device for segment stage",
+    )
+    wf.add_argument("--cpu", action="store_true", help="Force CPU for segment")
+    wf.add_argument("--lora-first", type=int, default=2022, help="First LoRA year_max")
+    wf.add_argument("--lora-second", type=int, default=2025, help="Second LoRA year_max")
+    wf.add_argument("--forecast-year", type=int, default=2027, help="Final forecast year")
+    wf.set_defaults(func=cmd_workflow)
 
     ev = sub.add_parser("eval", help="Evaluate predictions")
     ev.add_argument("--config", default="config/eval/eval.yaml")

@@ -44,6 +44,7 @@ from .index import (
 )
 from .utils.config import available_question_years, load_config, make_run_id, resolve_path
 from .utils.torch_device import cuda_available, cuda_device_name
+from .workflow import CompleteWorkflowConfig, run_complete_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,10 @@ def _banner() -> None:
     console.print(
         Panel(
             """Modular pipeline to forecast emergent neuroscience research directions from PubMed literature.\n
-            1 - Literature LoRA: fine-tune Mistral-7B on temporal question pairs.\n
-            2 - Benchmark: compare LoRA vs Mistral-7B vs BrainGPT on years after a saved LoRA year_max.\n""",
+            1 - Index: collect PubMed → segment → impact → embed.\n
+            2 - Literature LoRA: fine-tune Mistral-7B on temporal question pairs.\n
+            3 - Benchmark: compare LoRA vs Mistral-7B vs BrainGPT on years after a saved LoRA year_max.\n
+            5 - Complete workflow (GPU): full cluster run see Protocol.md.\n""",
             border_style="green",
         )
     )
@@ -843,6 +846,63 @@ def _run_compare(session: CompareSession) -> None:
         logger.exception("Benchmark failed")
 
 
+def _run_complete_workflow() -> None:
+    console.print("\n[bold magenta]Complete workflow (GPU required)[/bold magenta]")
+    console.print(
+        "[dim]Index → LoRA@2022 → benchmark+eval → LoRA@2025 → benchmark+eval → forecast 2027. "
+        "Uses locked protocol (temperature=0, 3 LLMs).[/dim]"
+    )
+    if not _ensure_hf_token():
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+    skip_index = Confirm.ask("Skip index (database already built)?", default=False)
+    db_path = load_config(INDEX_PIPELINE_CONFIG, IndexPipelineConfig).db_path
+    if skip_index:
+        if not _ensure_index_or_continue(db_path):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
+    elif not Confirm.ask(
+        "Run full index first (collect + impact + segment + embed)?", default=True
+    ):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+    device = "cuda" if cuda_available() else "cpu"
+    if cuda_available():
+        gpu = cuda_device_name()
+        label = f"cuda ({gpu})" if gpu else "cuda"
+        if Confirm.ask(f"Use GPU for segment? ({label})", default=True):
+            device = "cuda"
+        else:
+            device = "cpu"
+    else:
+        console.print("[yellow]No CUDA — segment will run on CPU (slow).[/yellow]")
+
+    _show_params_table(
+        "complete workflow",
+        [
+            ("Skip index", str(skip_index)),
+            ("Segment device", device),
+            ("LoRA anchor 1", "2022"),
+            ("LoRA anchor 2", "2025"),
+            ("Forecast year", "2027"),
+            ("Benchmark models", "literature_lora, mistral_base, braingpt"),
+            ("Temperature", "0.0 (locked)"),
+        ],
+    )
+    if not Confirm.ask("\nRun complete workflow?", default=True):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+
+    cfg = CompleteWorkflowConfig(skip_index=skip_index, segment_device=device)
+    try:
+        with console.status("[bold green]Running complete workflow…", spinner="dots"):
+            run_complete_workflow(cfg)
+        console.print(Panel("[bold green]✓ Complete workflow done[/bold green]", border_style="green"))
+    except Exception as e:
+        console.print(Panel(f"[bold red]Error:[/bold red] {e}", border_style="red"))
+        logger.exception("Complete workflow failed")
+
+
 def _show_status() -> None:
     base = load_config(INDEX_PIPELINE_CONFIG, IndexPipelineConfig)
     db_path = Prompt.ask("SQLite database", default=base.db_path)
@@ -891,11 +951,12 @@ def run_menu() -> None:
         console.print()
         console.print(
             "  [cyan]1[/cyan] Index   [cyan]2[/cyan] LoRA   [cyan]3[/cyan] Benchmark LLMs   "
+            "[cyan]5[/cyan] Complete workflow (GPU)   "
             "[cyan]4[/cyan] Database status   [cyan]0[/cyan] Quit"
         )
         choice = Prompt.ask(
             "[bold]Choose an action[/bold]",
-            choices=["1", "2", "3", "4", "0"],
+            choices=["1", "2", "3", "4", "5", "0"],
             default="1",
             show_choices=False,
         )
@@ -915,6 +976,8 @@ def run_menu() -> None:
                 _run_compare(session)
         elif choice == "4":
             _show_status()
+        elif choice == "5":
+            _run_complete_workflow()
 
 
 def main() -> None:

@@ -1,5 +1,6 @@
+# Predict + eval 2026 with LoRA trained through 2025 (standard year_max = N-1).
 db_path: data/neurolink.db
-test_years: [2023, 2024, 2025, 2026]
+test_years: [2026]
 top_k: [10, 50]
 models:
   - literature_lora
@@ -9,14 +10,6 @@ literature:
   max_context_questions: 40
   backend: lora
   use_4bit: true
-  train_epochs: 1
-  train_lr: 0.0001
-  train_fraction: 0.7
-  max_examples_per_year: 0
-  error_train_epochs: 2
-  error_max_examples: 50
-  semantic_threshold: 0.55
-  error_critical_only: true
   braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
   training_prompt_k: 1
   llm:

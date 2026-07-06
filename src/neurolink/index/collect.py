@@ -26,9 +26,9 @@ class CollectConfig:
     mesh: str = "Neurosciences"
     term: str | None = "cortex neuroscience"
     year_from: int = 2000
-    year_to: int = 2025
+    year_to: int = 2026
     exclude_reviews: bool = True
-    retmax: int = 60000
+    retmax: int = 100000
     batch_size: int = 200
     email: str | None = None
     delay_seconds: float = 0.34

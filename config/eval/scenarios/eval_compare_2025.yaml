@@ -1,0 +1,15 @@
+# Eval after benchmark with LoRA anchor year_max=2025 (year 2026 only).
+db_path: data/neurolink.db
+test_years: [2026]
+top_k: [10, 50]
+models:
+  - literature_lora
+  - mistral_base
+  - braingpt
+semantic_threshold: 0.55
+critical_only: false
+predict_config: config/forecast/predict_compare.yaml
+brainbench_enabled: true
+contamination_enabled: true
+brainbench_max_pairs: 50
+contamination_corpus_sample: 200

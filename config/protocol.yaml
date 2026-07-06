@@ -1,4 +1,6 @@
-# Locked evaluation protocol — see PLAN.md
+# Reference protocol — hyperparameters and eval defaults for reproducible runs.
+# Not loaded automatically by the pipeline; mirror these values in forecast/eval YAMLs.
+# See Protocol.md for the full experimental protocol.
 
 db_path: data/neurolink.db
 

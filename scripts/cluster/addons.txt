@@ -1,0 +1,8 @@
+# pip install ONLY those (after module load pytorch-gpu).
+# Ne pas ajouter torch / transformers / numpy / scipy / scikit-learn.
+pyyaml>=6.0
+dacite>=1.8
+requests>=2.31
+rich>=13.0
+peft>=0.10
+bitsandbytes>=0.42.0
