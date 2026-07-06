@@ -4,7 +4,7 @@ Modular pipeline to forecast emergent neuroscience research directions from PubM
 
 **Literature LoRA**: fine-tune Mistral-7B on temporal question pairs, with benchmark against Mistral-7B base and BrainGPT.
 
-image
+![image](neurolink.png)
 
 ## Why these models?
 
@@ -51,7 +51,7 @@ python -m neurolink menu
 
 Menu: **Index → LoRA → Benchmark → Complete workflow (GPU) → Status**.
 
-image
+![image](CLI.png)
 
 Or run the full protocol in one command (GPU required):
 
@@ -59,6 +59,8 @@ Or run the full protocol in one command (GPU required):
 neurolink workflow
 neurolink workflow --skip-index   # if index already built
 ```
+
+
 
 ## CLI reference
 
@@ -71,6 +73,8 @@ neurolink workflow --skip-index   # if index already built
 | `neurolink eval --config …`               | Metrics on latest predict run |
 | `neurolink workflow`                      | Complete protocol (above)     |
 | `neurolink menu`                          | Interactive UI                |
+
+
 
 
 ## Reference
