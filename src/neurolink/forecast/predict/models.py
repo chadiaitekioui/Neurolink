@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from ...db import Database
 from ...utils.config import infer_test_years, load_config, make_run_id, resolve_path
 from .literature_lora import LiteratureLoraConfig, make_literature_predictor
+from .llm_core import release_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,8 @@ def run_predict(config_path: str | PredictConfig, run_id: str | None = None) -> 
                         (N, model, rank, text, score, run_id, now),
                     )
                     n += 1
+            if model in LLM_LITERATURE_MODELS:
+                release_gpu_memory()
 
     db.record_run(run_id, "predict", notes=f"{n} predictions")
     logger.info("Predictions: %d rows (max_k=%d)", n, max_k)

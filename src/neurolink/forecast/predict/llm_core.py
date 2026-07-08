@@ -11,6 +11,25 @@ logger = logging.getLogger(__name__)
 _MODEL_CACHE: dict[str, tuple[object, object]] = {}
 
 
+def release_gpu_memory() -> None:
+    """Drop cached LMs and return VRAM to the driver (safe between train/benchmark stages)."""
+    global _MODEL_CACHE
+    for model, _tokenizer in _MODEL_CACHE.values():
+        del model
+    _MODEL_CACHE.clear()
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except ImportError:
+        pass
+
+
 @dataclass
 class CausalLMConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
@@ -45,15 +64,20 @@ def _load_model(cfg: CausalLMConfig) -> tuple[object, object]:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    logger.info("Loading LM base=%s adapter=%s", cfg.base_model, cfg.adapter_path or "none")
     model = AutoModelForCausalLM.from_pretrained(cfg.base_model, **load_kwargs)
 
     if cfg.adapter_path:
-        try:
-            from peft import PeftModel
+        from pathlib import Path
 
-            model = PeftModel.from_pretrained(model, cfg.adapter_path)
-        except Exception as e:
-            logger.warning("LoRA adapter not loaded (%s)", e)
+        from peft import PeftModel
+
+        adapter = Path(cfg.adapter_path)
+        if not adapter.is_dir():
+            raise FileNotFoundError(
+                f"LoRA adapter directory not found: {cfg.adapter_path}"
+            )
+        model = PeftModel.from_pretrained(model, str(adapter))
 
     model.eval()
     _MODEL_CACHE[cache_key] = (model, tokenizer)

@@ -13,9 +13,11 @@ export TRANSFORMERS_OFFLINE=0
 unset HF_HUB_OFFLINE
 
 echo "=== Neurolink — setup login ==="
+echo "PYTHONUSERBASE=$PYTHONUSERBASE"
+echo "HF_HOME=$HF_HOME"
 
 if [[ -z "${HF_TOKEN:-}" && -z "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
-  echo "WARNING: export HF_TOKEN before GPU jobs (Mistral-7B gated)." >&2
+  echo "WARNING: export HF_TOKEN before GPU jobs (Mistral-7B and BrainGPT are gated)." >&2
 fi
 
 if command -v idr_module_search >/dev/null 2>&1; then
@@ -37,16 +39,13 @@ MODELS=(
 
 if command -v huggingface-cli >/dev/null 2>&1; then
   for model in "${MODELS[@]}"; do
-    name="${model##*/}"
-    if [[ -d "$HF_HOME/models--${model//\//--}" ]] || [[ -d "$HF_HOME/hub/models--${model//\//--}" ]]; then
-      echo "=== Model cached: $model ==="
-    else
-      echo "=== Download: $model → $HF_HOME ==="
-      huggingface-cli download "$model"
-    fi
+    echo "=== Ensure cached: $model → $HF_HOME ==="
+    huggingface-cli download "$model"
   done
+  python "$CLUSTER_DIR/verify_models.py"
 else
-  echo "WARNING: huggingface-cli missing — use \$DSDIR or install huggingface_hub." >&2
+  echo "WARNING: huggingface-cli missing — pip install huggingface_hub and retry." >&2
+  exit 1
 fi
 
 mkdir -p logs data eval

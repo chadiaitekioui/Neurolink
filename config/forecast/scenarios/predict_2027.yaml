@@ -12,7 +12,7 @@ literature:
   max_context_questions: 40
   backend: lora
   use_4bit: true
-  braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
+  braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   training_prompt_k: 1
   llm:
     max_new_tokens: 96

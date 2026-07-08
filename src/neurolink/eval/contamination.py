@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ContaminationReport:
     corpus_recycling_rate: float
+    context_recycling_rate: float
+    context_verbatim_recycling_rate: float
     train_eval_overlap_rate: float
     verbatim_recycling_rate: float
     zlib_ppl_train_mean: float | None
@@ -29,6 +31,7 @@ class ContaminationReport:
     zlib_ppl_pred_high_rate: float | None
     n_predictions: int
     n_train_completions: int
+    n_context_questions: int
 
 
 def _normalize(text: str) -> str:
@@ -123,6 +126,10 @@ def run_contamination_audit(
     )
     eval_questions = _eval_questions(conn, target_year)
 
+    from ..forecast.predict.literature_lora import list_context_questions
+
+    context_questions = list_context_questions(conn, target_year, lit_cfg)
+
     rng = random.Random(seed)
     corpus_sample = corpus if len(corpus) <= corpus_sample_size else rng.sample(corpus, corpus_sample_size)
 
@@ -137,6 +144,10 @@ def run_contamination_audit(
 
     return ContaminationReport(
         corpus_recycling_rate=_semantic_recycling_rate(predictions, corpus, semantic_threshold),
+        context_recycling_rate=_semantic_recycling_rate(
+            predictions, context_questions, semantic_threshold
+        ),
+        context_verbatim_recycling_rate=_verbatim_rate(predictions, context_questions),
         train_eval_overlap_rate=(
             _train_eval_overlap(train_completions, eval_questions, semantic_threshold)
             if include_train_overlap
@@ -149,4 +160,5 @@ def run_contamination_audit(
         zlib_ppl_pred_high_rate=pred_stats.high_ratio_rate if pred_stats else None,
         n_predictions=len(predictions),
         n_train_completions=len(train_completions),
+        n_context_questions=len(context_questions),
     )

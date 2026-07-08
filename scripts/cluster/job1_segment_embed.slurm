@@ -2,12 +2,14 @@
 #SBATCH --job-name=nl-segment
 #SBATCH --output=logs/nl-segment-%j.out
 #SBATCH --error=logs/nl-segment-%j.err
-#SBATCH --time=12:00:00
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
-#SBATCH --account=REPLACE_WITH_YOUR_GPU_ACCOUNT
+#SBATCH --time=12:00:00
+#SBATCH --account=REPLACE_WITH_YOUR_PROJECT@v100
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 

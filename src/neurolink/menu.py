@@ -389,7 +389,7 @@ def _confirm_compare(session: CompareSession) -> bool:
             ("Context questions", str(cfg.literature.max_context_questions)),
             ("Temperature", f"{cfg.literature.llm.temperature:.2f}"),
             ("4-bit", str(cfg.literature.use_4bit)),
-            ("BrainGPT adapter", cfg.literature.braingpt_adapter),
+            ("BrainGPT model", cfg.literature.braingpt_model),
         ],
     )
     return Confirm.ask("\nRun benchmark?", default=True)

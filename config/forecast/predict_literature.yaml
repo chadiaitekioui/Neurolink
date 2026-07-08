@@ -17,7 +17,7 @@ literature:
   error_max_examples: 50
   semantic_threshold: 0.55
   error_critical_only: true
-  braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
+  braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   training_prompt_k: 1
   llm:
     max_new_tokens: 96

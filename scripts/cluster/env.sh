@@ -18,8 +18,8 @@ export PYTHONUNBUFFERED=1
 export PYTHONUSERBASE="${PYTHONUSERBASE:-${WORK:-$HOME}/.local_neurolink}"
 export PATH="${PYTHONUSERBASE}/bin:${PATH}"
 export HF_HOME="${HF_HOME:-${WORK:-$HOME}/huggingface}"
-export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
-export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HUB_CACHE}"
 export TOKENIZERS_PARALLELISM=false
 
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
@@ -42,6 +42,10 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   fi
   if ! python "$CLUSTER_DIR/check_deps.py"; then
     echo "ERROR: run bash scripts/cluster/setup_login.sh on the login node first." >&2
+    exit 1
+  fi
+  if ! python "$CLUSTER_DIR/verify_models.py"; then
+    echo "ERROR: HuggingFace models not cached — run setup_login.sh on login node." >&2
     exit 1
   fi
 fi

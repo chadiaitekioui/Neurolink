@@ -9,7 +9,7 @@ models:
 seed: 42
 literature:
   adapter_dir: data/models/literature
-  braingpt_adapter: BrainGPT/BrainGPT-7B-v0.2
+  braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   max_context_questions: 40
   backend: lora
   use_4bit: true

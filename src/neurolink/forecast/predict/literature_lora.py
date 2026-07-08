@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...eval.matching import TfidfMatcher
-from .llm_core import CausalLMConfig, generate_questions
+from .llm_core import CausalLMConfig, generate_questions, release_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class LiteratureLoraConfig:
     error_max_examples: int = 50
     semantic_threshold: float = 0.55
     error_critical_only: bool = True
-    braingpt_adapter: str = "BrainGPT/BrainGPT-7B-v0.2"
+    braingpt_model: str = "BrainGPT/BrainGPT-7B-v0.2"
     benchmark_lora_year_max: int | None = None  # compare: fixed LoRA adapter for all benchmark years
     context_year_max: int | None = None  # override context horizon (default: target_year - 1)
     training_prompt_k: int = 1  # k in training prompts (one completion per example)
@@ -68,8 +68,12 @@ def _training_examples_for_year(questions: list[str], cfg: LiteratureLoraConfig)
     return questions[:n_use]
 
 
-def build_context_summary(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
-    """Top-impact questions published on or before context_year (recent window)."""
+def _fetch_context_question_rows(
+    conn: sqlite3.Connection,
+    context_year: int,
+    max_q: int,
+) -> list[sqlite3.Row]:
+    """Same selection as build_context_summary — top-impact questions in the 5-year window."""
     year_floor = max(context_year - 5, 0)
     rows = conn.execute(
         """
@@ -85,6 +89,29 @@ def build_context_summary(conn: sqlite3.Connection, context_year: int, max_q: in
             "SELECT question_text, impact_score, year FROM questions WHERE year <= ? LIMIT ?",
             (context_year, max_q),
         ).fetchall()
+    return rows
+
+
+def list_context_questions(
+    conn: sqlite3.Connection,
+    target_year: int,
+    cfg: LiteratureLoraConfig,
+    *,
+    context_year: int | None = None,
+) -> list[str]:
+    """Question texts shown in the generation prompt CONTEXT block for target_year."""
+    ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
+    rows = _fetch_context_question_rows(conn, ctx_year, cfg.max_context_questions)
+    return [
+        (r["question_text"] or "").strip()
+        for r in rows
+        if (r["question_text"] or "").strip()
+    ]
+
+
+def build_context_summary(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
+    """Top-impact questions published on or before context_year (recent window)."""
+    rows = _fetch_context_question_rows(conn, context_year, max_q)
     lines = []
     for i, r in enumerate(rows, start=1):
         yr = r["year"] or "?"
@@ -414,6 +441,8 @@ def train_literature_lora(
         )
         out_dir = _save_adapter(model, tokenizer, cfg, year_max)
         logger.info("Literature LoRA saved: %s (%d examples)", out_dir, len(examples))
+        del model, tokenizer
+        release_gpu_memory()
         return len(examples)
     except ImportError:
         logger.warning("peft/torch unavailable — skipping literature LoRA training")
@@ -474,6 +503,8 @@ def train_literature_lora_on_errors(
             len(examples),
             target_year,
         )
+        del peft_model, tokenizer
+        release_gpu_memory()
         return len(examples)
     except ImportError:
         logger.warning("peft/torch unavailable — skipping error LoRA training")
@@ -514,8 +545,9 @@ def resolve_literature_llm_cfg(
                 adapter_year,
             )
     elif model == "braingpt":
-        llm_cfg.adapter_path = cfg.braingpt_adapter
-        logger.info("Using BrainGPT adapter: %s", cfg.braingpt_adapter)
+        llm_cfg.base_model = cfg.braingpt_model
+        llm_cfg.adapter_path = None
+        logger.info("Using BrainGPT model: %s", cfg.braingpt_model)
     elif model == "mistral_base":
         logger.info("Using base Mistral (no adapter)")
     else:

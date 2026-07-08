@@ -97,8 +97,10 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                     continue
 
                 matcher = TfidfMatcher([r["text"] for r in refs], cfg.semantic_threshold)
+                precision_by_k: dict[int, float] = {}
                 for k in cfg.top_k:
                     p, r = matcher.precision_recall_at_k(preds, k)
+                    precision_by_k[k] = p
                     _append_metric(rows_to_insert, year=N, model=model, metric="precision@k", value=p, eval_run=eval_run, k=k)
                     _append_metric(rows_to_insert, year=N, model=model, metric="recall@k", value=r, eval_run=eval_run, k=k)
 
@@ -146,12 +148,42 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                             value=report.corpus_recycling_rate, eval_run=eval_run,
                         )
                         _append_metric(
+                            rows_to_insert, year=N, model=model, metric="contamination_context_recycling",
+                            value=report.context_recycling_rate, eval_run=eval_run,
+                        )
+                        _append_metric(
+                            rows_to_insert, year=N, model=model, metric="contamination_context_verbatim_recycling",
+                            value=report.context_verbatim_recycling_rate, eval_run=eval_run,
+                        )
+                        _append_metric(
                             rows_to_insert, year=N, model=model, metric="contamination_train_eval_overlap",
                             value=report.train_eval_overlap_rate, eval_run=eval_run,
                         )
                         _append_metric(
                             rows_to_insert, year=N, model=model, metric="contamination_verbatim_recycling",
                             value=report.verbatim_recycling_rate, eval_run=eval_run,
+                        )
+                        primary_k = max(cfg.top_k) if cfg.top_k else 50
+                        p_primary = precision_by_k.get(primary_k, 0.0)
+                        extension_vs_context = p_primary - report.context_recycling_rate
+                        extension_vs_corpus = p_primary - report.corpus_recycling_rate
+                        _append_metric(
+                            rows_to_insert,
+                            year=N,
+                            model=model,
+                            metric="extension_vs_context",
+                            value=extension_vs_context,
+                            eval_run=eval_run,
+                            k=primary_k,
+                        )
+                        _append_metric(
+                            rows_to_insert,
+                            year=N,
+                            model=model,
+                            metric="extension_vs_corpus",
+                            value=extension_vs_corpus,
+                            eval_run=eval_run,
+                            k=primary_k,
                         )
                         if report.zlib_ppl_pred_mean is not None:
                             _append_metric(
@@ -169,12 +201,15 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                                 value=report.zlib_ppl_train_mean, eval_run=eval_run,
                             )
                         logger.info(
-                            "Contamination %d: corpus_recycling=%.3f train_eval_overlap=%.3f "
-                            "verbatim=%.3f zlib_ppl_pred_high=%s",
+                            "Contamination %d: corpus_recycling=%.3f context_recycling=%.3f "
+                            "train_eval_overlap=%.3f verbatim=%.3f extension_vs_context=%.3f "
+                            "zlib_ppl_pred_high=%s",
                             N,
                             report.corpus_recycling_rate,
+                            report.context_recycling_rate,
                             report.train_eval_overlap_rate,
                             report.verbatim_recycling_rate,
+                            extension_vs_context,
                             f"{report.zlib_ppl_pred_high_rate:.3f}" if report.zlib_ppl_pred_high_rate is not None else "n/a",
                         )
 
@@ -212,7 +247,9 @@ def write_summary(db: Database, run_id: str, path: Path) -> None:
         f"run_id: `{run_id}`\n\n",
         "Metrics follow Luo et al. (2025) BrainBench where noted: "
         "paired perplexity discrimination (`brainbench_*`) and "
-        "zlib–perplexity memorization ratios (`contamination_zlib_ppl_*`).\n\n",
+        "zlib–perplexity memorization ratios (`contamination_zlib_ppl_*`). "
+        "`extension_vs_context` = P@k − context_recycling (legitimate extension proxy); "
+        "`extension_vs_corpus` = P@k − corpus_recycling.\n\n",
         "| Year | Model | Metric | k | Value |\n",
         "|------|-------|--------|---|-------|\n",
     ]
