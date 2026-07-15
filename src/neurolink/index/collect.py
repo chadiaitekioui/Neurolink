@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 import urllib.parse
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+_FETCH_RETRIES = 6
 
 
 @dataclass
@@ -43,28 +45,69 @@ def build_search_term(cfg: CollectConfig) -> str:
     )
 
 
-def _curl(url: str) -> str:
-    proc = subprocess.run(["curl", "-s", url], capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(f"curl failed: {proc.stderr}")
-    return proc.stdout
+def _ncbi_params(cfg: CollectConfig) -> dict[str, str]:
+    params: dict[str, str] = {"tool": "neurolink"}
+    email = (cfg.email or os.environ.get("NCBI_EMAIL", "")).strip()
+    if email:
+        params["email"] = email
+    api_key = os.environ.get("NCBI_API_KEY", "").strip()
+    if api_key:
+        params["api_key"] = api_key
+    return params
 
 
-def esearch_pmids(term: str, retmax: int, retstart: int = 0) -> tuple[list[str], int]:
+def _fetch_url(url: str, *, expect_json: bool = False, label: str = "NCBI") -> str:
+    last_exc: Exception | None = None
+    for attempt in range(_FETCH_RETRIES):
+        proc = subprocess.run(
+            ["curl", "-sS", "-f", "--max-time", "120", url],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        body = proc.stdout
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or (body.strip()[:300] if body else "empty body")
+            last_exc = RuntimeError(f"{label}: curl exit {proc.returncode}: {err}")
+        elif not body.strip():
+            last_exc = RuntimeError(f"{label}: empty response")
+        elif expect_json:
+            try:
+                json.loads(body)
+            except json.JSONDecodeError as exc:
+                last_exc = RuntimeError(
+                    f"{label}: invalid JSON ({exc}); preview={body[:200]!r}"
+                )
+            else:
+                return body
+        else:
+            return body
+        logger.warning("%s (retry %d/%d)", last_exc, attempt + 1, _FETCH_RETRIES)
+        time.sleep(min(2.0**attempt, 60.0))
+    raise last_exc or RuntimeError(f"{label}: fetch failed")
+
+
+def esearch_pmids(
+    cfg: CollectConfig,
+    term: str,
+    retmax: int,
+    retstart: int = 0,
+) -> tuple[list[str], int]:
     params = {
         "db": "pubmed",
         "term": term,
         "retmax": str(retmax),
         "retstart": str(retstart),
         "retmode": "json",
+        **_ncbi_params(cfg),
     }
     url = f"{ESEARCH}?{urllib.parse.urlencode(params)}"
-    data = json.loads(_curl(url))
+    data = json.loads(_fetch_url(url, expect_json=True, label="esearch"))
     er = data["esearchresult"]
     return er.get("idlist", []), int(er.get("count", 0))
 
 
-def efetch_abstracts(pmids: list[str]) -> str:
+def efetch_abstracts(cfg: CollectConfig, pmids: list[str]) -> str:
     if not pmids:
         return ""
     params = {
@@ -72,9 +115,10 @@ def efetch_abstracts(pmids: list[str]) -> str:
         "id": ",".join(pmids),
         "rettype": "abstract",
         "retmode": "text",
+        **_ncbi_params(cfg),
     }
     url = f"{EFETCH}?{urllib.parse.urlencode(params)}"
-    return _curl(url)
+    return _fetch_url(url, label="efetch")
 
 
 def _article_row(art: ParsedArticle) -> ArticleRow:
@@ -95,22 +139,30 @@ def _parse_efetch_batch(text: str, requested_pmids: list[str]) -> tuple[list[Par
     return articles, skipped
 
 
+def _existing_pmids(db: Database) -> set[str]:
+    with db.connect() as conn:
+        return {row[0] for row in conn.execute("SELECT pmid FROM articles")}
+
+
 def collect_pubmed(cfg: CollectConfig, run_id: str) -> int:
     db = Database(resolve_path(cfg.db_path))
     db.init_schema()
     term = build_search_term(cfg)
     logger.info("PubMed query: %s", term)
 
-    rows: list[ArticleRow] = []
-    stored_pmids: set[str] = set()
+    stored_pmids = _existing_pmids(db)
+    if stored_pmids:
+        logger.info("Resuming collect: %d articles already in database", len(stored_pmids))
+
     tried_pmids: set[str] = set()
     retstart = 0
     total_count = 0
+    stored_total = len(stored_pmids)
 
-    while len(rows) < cfg.retmax:
-        remaining = cfg.retmax - len(rows)
+    while stored_total < cfg.retmax:
+        remaining = cfg.retmax - stored_total
         batch_max = min(cfg.batch_size, remaining)
-        pmids, total_count = esearch_pmids(term, batch_max, retstart)
+        pmids, total_count = esearch_pmids(cfg, term, batch_max, retstart)
         if not pmids:
             break
 
@@ -122,7 +174,7 @@ def collect_pubmed(cfg: CollectConfig, run_id: str) -> int:
                 break
             continue
 
-        text = efetch_abstracts(candidates)
+        text = efetch_abstracts(cfg, candidates)
         articles, skipped = _parse_efetch_batch(text, candidates)
         if skipped:
             logger.info(
@@ -131,20 +183,25 @@ def collect_pubmed(cfg: CollectConfig, run_id: str) -> int:
                 ", ".join(skipped[:5]) + ("..." if len(skipped) > 5 else ""),
             )
 
+        batch_rows: list[ArticleRow] = []
         for art in articles:
             if art.pmid in stored_pmids:
                 continue
-            rows.append(_article_row(art))
+            batch_rows.append(_article_row(art))
             stored_pmids.add(art.pmid)
-            if len(rows) >= cfg.retmax:
+            stored_total += 1
+            if stored_total >= cfg.retmax:
                 break
 
-        if len(rows) >= cfg.retmax:
+        if batch_rows:
+            db.upsert_articles(batch_rows)
+
+        if stored_total >= cfg.retmax:
             break
         if retstart >= total_count:
             logger.info(
                 "Only %d/%d articles with parseable abstracts available in PubMed",
-                len(rows),
+                stored_total,
                 cfg.retmax,
             )
             break
@@ -152,7 +209,7 @@ def collect_pubmed(cfg: CollectConfig, run_id: str) -> int:
 
     logger.info(
         "Collect: %d parseable articles stored (%d PMID candidates tried / %d available, retmax=%d)",
-        len(rows),
+        stored_total,
         len(tried_pmids),
         total_count,
         cfg.retmax,
@@ -164,10 +221,9 @@ def collect_pubmed(cfg: CollectConfig, run_id: str) -> int:
             cfg.retmax,
         )
 
-    n = db.upsert_articles(rows)
-    db.record_run(run_id, "collect", notes=f"{n} articles")
-    logger.info("Collect finished: %d articles in database", n)
-    return n
+    db.record_run(run_id, "collect", notes=f"{stored_total} articles")
+    logger.info("Collect finished: %d articles in database", stored_total)
+    return stored_total
 
 
 def import_pubmed_text_file(cfg: CollectConfig, text_path: Path, run_id: str) -> int:
