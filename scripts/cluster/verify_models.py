@@ -22,12 +22,13 @@ def is_model_cached(model_id: str, hf_home: Path | None = None) -> bool:
     """True when at least one snapshot exists in the HF hub cache."""
     root = hf_home or _hf_home()
     slug = "models--" + model_id.replace("/", "--")
+    marker_files = ("config.json", "adapter_config.json")
     for cache_root in (root / "hub" / slug, root / slug):
         snapshots = cache_root / "snapshots"
         if not snapshots.is_dir():
             continue
         for snap in snapshots.iterdir():
-            if snap.is_dir() and (snap / "config.json").is_file():
+            if snap.is_dir() and any((snap / name).is_file() for name in marker_files):
                 return True
     return False
 

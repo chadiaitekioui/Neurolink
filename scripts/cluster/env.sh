@@ -3,7 +3,7 @@
 # Login:  source scripts/cluster/env.sh
 # SLURM:  sourced by job scripts (offline, no pip).
 
-set -euo pipefail
+set -uo pipefail
 
 CLUSTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${NEUROLINK_ROOT:=$(cd "$CLUSTER_DIR/../.." && pwd)}"
@@ -11,7 +11,6 @@ cd "$NEUROLINK_ROOT"
 export PYTHONPATH="${NEUROLINK_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 module purge
-module load arch/v100
 module load pytorch-gpu
 
 export PYTHONUNBUFFERED=1
