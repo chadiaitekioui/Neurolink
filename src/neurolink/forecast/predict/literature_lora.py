@@ -545,9 +545,14 @@ def resolve_literature_llm_cfg(
                 adapter_year,
             )
     elif model == "braingpt":
-        llm_cfg.base_model = cfg.braingpt_model
-        llm_cfg.adapter_path = None
-        logger.info("Using BrainGPT model: %s", cfg.braingpt_model)
+        # BrainGPT on HF is a PEFT adapter on Mistral-7B-v0.1 (adapter_config.json + weights).
+        llm_cfg.base_model = cfg.base_model
+        llm_cfg.adapter_path = cfg.braingpt_model
+        logger.info(
+            "Using BrainGPT adapter %s on base %s",
+            cfg.braingpt_model,
+            cfg.base_model,
+        )
     elif model == "mistral_base":
         logger.info("Using base Mistral (no adapter)")
     else:

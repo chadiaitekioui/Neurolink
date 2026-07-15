@@ -33,7 +33,7 @@ def release_gpu_memory() -> None:
 @dataclass
 class CausalLMConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
-    adapter_path: str | None = None
+    adapter_path: str | None = None  # local lora/ dir or Hub id (BrainGPT/...)
     use_4bit: bool = True
     max_new_tokens: int = 80
     num_return_sequences: int = 1
@@ -72,12 +72,17 @@ def _load_model(cfg: CausalLMConfig) -> tuple[object, object]:
 
         from peft import PeftModel
 
-        adapter = Path(cfg.adapter_path)
-        if not adapter.is_dir():
+        adapter_ref = cfg.adapter_path
+        adapter_path = Path(adapter_ref)
+        if adapter_path.is_dir():
+            model = PeftModel.from_pretrained(model, str(adapter_path))
+        elif "/" in adapter_ref and not adapter_path.exists():
+            # Hugging Face Hub adapter id (e.g. BrainGPT/BrainGPT-7B-v0.2)
+            model = PeftModel.from_pretrained(model, adapter_ref)
+        else:
             raise FileNotFoundError(
-                f"LoRA adapter directory not found: {cfg.adapter_path}"
+                f"LoRA adapter not found (local directory or Hub id): {cfg.adapter_path}"
             )
-        model = PeftModel.from_pretrained(model, str(adapter))
 
     model.eval()
     _MODEL_CACHE[cache_key] = (model, tokenizer)
