@@ -115,6 +115,8 @@ class Database:
         # WAL + mmap on Lustre ($WORK) can trigger Bus error on login nodes — use DELETE there.
         journal = os.environ.get("NEUROLINK_SQLITE_JOURNAL", "WAL").strip() or "WAL"
         conn.execute(f"PRAGMA journal_mode={journal}")
+        # Avoid mmap issues on Lustre by disabling memory mapping.
+        conn.execute("PRAGMA mmap_size=0")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
