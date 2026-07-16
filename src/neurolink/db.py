@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -111,7 +112,9 @@ class Database:
     @contextmanager
     def connect(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
+        # WAL + mmap on Lustre ($WORK) can trigger Bus error on login nodes — use DELETE there.
+        journal = os.environ.get("NEUROLINK_SQLITE_JOURNAL", "WAL").strip() or "WAL"
+        conn.execute(f"PRAGMA journal_mode={journal}")
         conn.row_factory = sqlite3.Row
         try:
             yield conn

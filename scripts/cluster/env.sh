@@ -20,6 +20,8 @@ export HF_HOME="${HF_HOME:-${WORK:-$HOME}/huggingface}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HUB_CACHE}"
 export TOKENIZERS_PARALLELISM=false
+# SQLite WAL on Lustre ($WORK) can crash with Bus error during long collect runs.
+export NEUROLINK_SQLITE_JOURNAL="${NEUROLINK_SQLITE_JOURNAL:-DELETE}"
 
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   export TRANSFORMERS_OFFLINE=1
