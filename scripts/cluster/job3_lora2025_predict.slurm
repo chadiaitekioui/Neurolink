@@ -9,6 +9,7 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=40:00:00
+#SBATCH --qos=qos_gpu-t4
 #SBATCH --account=tnv@v100
 #SBATCH --export=ALL
 #SBATCH -C v100-32g

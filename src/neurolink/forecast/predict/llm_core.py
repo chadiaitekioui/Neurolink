@@ -11,6 +11,20 @@ logger = logging.getLogger(__name__)
 _MODEL_CACHE: dict[str, tuple[object, object]] = {}
 
 
+def model_input_device(model) -> object:
+    """Device for batch tensors (works with device_map='auto' / 4-bit)."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return getattr(model, "device", "cpu")
+
+
+def move_inputs_to_model(inputs: dict, model) -> dict:
+    """Move tokenizer tensors onto the same device as the model weights."""
+    device = model_input_device(model)
+    return {k: v.to(device) for k, v in inputs.items()}
+
+
 def release_gpu_memory() -> None:
     """Drop cached LMs and return VRAM to the driver (safe between train/benchmark stages)."""
     global _MODEL_CACHE
@@ -116,8 +130,7 @@ def score_completion(prompt: str, completion: str, cfg: CausalLMConfig) -> float
     model, tokenizer = _load_model(cfg)
     text = prompt.rstrip() + "\n" + completion.strip()
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=768)
-    if not cfg.use_4bit:
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    inputs = move_inputs_to_model(inputs, model)
     prompt_len = len(tokenizer(prompt, truncation=True, max_length=768)["input_ids"])
     labels = inputs["input_ids"].clone()
     labels[0, :prompt_len] = -100
@@ -134,8 +147,7 @@ def sequence_perplexity(text: str, cfg: CausalLMConfig, *, max_length: int = 204
 
     model, tokenizer = _load_model(cfg)
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
-    if not cfg.use_4bit:
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    inputs = move_inputs_to_model(inputs, model)
     with torch.no_grad():
         out = model(**inputs, labels=inputs["input_ids"])
     return math.exp(float(out.loss.item()))
@@ -154,8 +166,7 @@ def generate_questions(
     model, tokenizer = _load_model(cfg)
 
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    if not cfg.use_4bit:
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    inputs = move_inputs_to_model(inputs, model)
 
     greedy = cfg.temperature <= 0.0
     if greedy:

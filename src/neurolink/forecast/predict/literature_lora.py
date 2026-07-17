@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...eval.matching import TfidfMatcher
-from .llm_core import CausalLMConfig, generate_questions, release_gpu_memory
+from .llm_core import CausalLMConfig, generate_questions, move_inputs_to_model, release_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -374,14 +374,14 @@ def _train_on_examples(
     lr: float,
     use_4bit: bool,
 ) -> None:
+    del use_4bit  # device_map / 4-bit: always move batches via move_inputs_to_model
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     for epoch in range(epochs):
         total_loss = 0.0
         for prompt, completion in examples:
             text = prompt + " " + completion
             inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=768)
-            if not use_4bit:
-                inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            inputs = move_inputs_to_model(inputs, model)
             labels = inputs["input_ids"].clone()
             prompt_len = len(tokenizer(prompt, truncation=True, max_length=768)["input_ids"])
             labels[0, :prompt_len] = -100
