@@ -31,6 +31,8 @@ class SegmentConfig:
         "ml4pubmed/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext_pub_section"
     )
     device: str = "cpu"  # cpu | cuda | auto (auto: use CUDA when available)
+    # Commit every N newly segmented articles (resume-safe on interrupt).
+    commit_every: int = 100
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -111,6 +113,37 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
     db.init_schema()
     run_id = run_id or make_run_id("segment")
     now = datetime.now(timezone.utc).isoformat()
+    commit_every = max(1, cfg.commit_every)
+
+    with db.connect(readonly=True) as conn:
+        articles = conn.execute(
+            """
+            SELECT a.pmid, a.abstract, a.text_work
+            FROM articles a
+            LEFT JOIN article_segments s ON a.pmid = s.pmid
+            WHERE s.pmid IS NULL
+            """
+        ).fetchall()
+        total_articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        already = total_articles - len(articles)
+
+    if not articles:
+        logger.info(
+            "Segmentation already complete: %d/%d articles",
+            already,
+            total_articles,
+        )
+        return 0
+
+    if already:
+        logger.info(
+            "Resuming segmentation: %d/%d already done (%d remaining)",
+            already,
+            total_articles,
+            len(articles),
+        )
+    else:
+        logger.info("Segmentation: %d articles", len(articles))
 
     device = resolve_torch_device(cfg.device)
 
@@ -124,9 +157,6 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
 
     n = 0
     with db.connect() as conn:
-        articles = conn.execute(
-            "SELECT pmid, abstract, text_work FROM articles"
-        ).fetchall()
         for row in articles:
             text = (row["text_work"] or row["abstract"] or "").strip()
             question, results = segment_abstract(text, tokenizer, model, id2label, device)
@@ -141,7 +171,16 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
                 (row["pmid"], question, results, "hybrid", None, now),
             )
             n += 1
+            if n % commit_every == 0:
+                conn.commit()
+                done = already + n
+                logger.info(
+                    "Segmentation: %d/%d (%.1f%%)",
+                    done,
+                    total_articles,
+                    100.0 * done / max(1, total_articles),
+                )
 
-    db.record_run(run_id, "segment", notes=f"{n} articles")
-    logger.info("Segmentation: %d articles", n)
+    db.record_run(run_id, "segment", notes=f"{n} new / {already + n} total")
+    logger.info("Segmentation: %d new articles (%d total)", n, already + n)
     return n

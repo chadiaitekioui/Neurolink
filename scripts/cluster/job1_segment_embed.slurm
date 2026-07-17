@@ -9,19 +9,22 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=12:00:00
-#SBATCH --account=REPLACE_WITH_YOUR_PROJECT@v100
+#SBATCH --account=tnv@v100
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Job 1 — segment (GPU) + embed (CPU). Requires login_index.sh first.
+# Job 1 — complete index on GPU: segment (resume) → impact → embed (MiniLM).
+# Stages already done are skipped. Requires collect (+ optional early impact) first.
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
 NEUROLINK_ENV_QUIET=1
 source scripts/cluster/env.sh
 
-echo "=== Job 1: segment (GPU) + embed ==="
+echo "=== Job 1: segment → impact → embed (skip if already done) ==="
+neurolink status
 neurolink segment --config config/index/segment.yaml --device cuda
+neurolink impact --config config/index/impact.yaml
 neurolink embed --config config/index/embed.yaml
 neurolink status
 echo "=== Job 1 done ==="

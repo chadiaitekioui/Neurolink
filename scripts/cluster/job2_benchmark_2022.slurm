@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=40:00:00
-#SBATCH --account=REPLACE_WITH_YOUR_PROJECT@v100
+#SBATCH --account=tnv@v100
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 

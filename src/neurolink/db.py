@@ -104,23 +104,46 @@ class ArticleRow:
     fetched_at: str | None = None
 
 
+def _journal_mode_for_path(path: Path) -> str:
+    """Pick a journal mode safe for the DB location (Lustre vs local disk)."""
+    override = os.environ.get("NEUROLINK_SQLITE_JOURNAL", "").strip()
+    if override:
+        return override
+    resolved = str(path.resolve())
+    if "/lustre/" in resolved:
+        return "DELETE"
+    for key in ("WORK", "SCRATCH", "LUSTRE"):
+        root = os.environ.get(key, "").strip()
+        if root and resolved.startswith(str(Path(root).resolve())):
+            return "DELETE"
+    return "WAL"
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
-    def connect(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(self.path, timeout=30)
-        # WAL + mmap on Lustre ($WORK) can trigger Bus error on login nodes — use DELETE there.
-        journal = os.environ.get("NEUROLINK_SQLITE_JOURNAL", "WAL").strip() or "WAL"
-        conn.execute(f"PRAGMA journal_mode={journal}")
-        # Avoid mmap issues on Lustre by disabling memory mapping.
-        conn.execute("PRAGMA mmap_size=0")
+    def connect(self, *, readonly: bool = False) -> Generator[sqlite3.Connection, None, None]:
+        if readonly:
+            conn = sqlite3.connect(
+                f"file:{self.path.resolve()}?mode=ro",
+                uri=True,
+                timeout=30,
+            )
+        else:
+            conn = sqlite3.connect(self.path, timeout=30)
+            # WAL + mmap on Lustre ($WORK) can trigger Bus error / disk I/O errors.
+            journal = _journal_mode_for_path(self.path)
+            conn.execute(f"PRAGMA journal_mode={journal}")
+            # Avoid mmap issues on Lustre by disabling memory mapping.
+            conn.execute("PRAGMA mmap_size=0")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
-            conn.commit()
+            if not readonly:
+                conn.commit()
         finally:
             conn.close()
 

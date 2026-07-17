@@ -19,7 +19,8 @@ class EmbedConfig:
     db_path: str = "data/neurolink.db"
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     batch_size: int = 64
-    fallback: str = "tfidf"  # tfidf when sentence-transformers is missing
+    # "none"/"model" → MiniLM (default); "tfidf" → force sklearn TF-IDF.
+    fallback: str = "none"
 
 
 def _embed_tfidf(texts: list[str]) -> np.ndarray:
@@ -41,11 +42,34 @@ def run_embed(config_path: str | EmbedConfig, run_id: str | None = None) -> int:
     db = Database(resolve_path(cfg.db_path))
     run_id = run_id or make_run_id("embed")
 
-    with db.connect() as conn:
-        rows = conn.execute("SELECT id, question_text FROM questions ORDER BY id").fetchall()
-    if not rows:
-        logger.warning("No questions to embed")
+    with db.connect(readonly=True) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        rows = conn.execute(
+            """
+            SELECT id, question_text FROM questions
+            WHERE embedding IS NULL
+            ORDER BY id
+            """
+        ).fetchall()
+        already = total - len(rows)
+
+    if total == 0:
+        logger.warning("No questions to embed — run impact after segment first")
         return 0
+
+    if not rows:
+        logger.info("Embeddings already complete: %d/%d questions", already, total)
+        return 0
+
+    if already:
+        logger.info(
+            "Resuming embed: %d/%d already done (%d remaining)",
+            already,
+            total,
+            len(rows),
+        )
+    else:
+        logger.info("Embeddings: %d questions", len(rows))
 
     ids = [r["id"] for r in rows]
     texts = [r["question_text"] for r in rows]
@@ -69,6 +93,6 @@ def run_embed(config_path: str | EmbedConfig, run_id: str | None = None) -> int:
                 (pickle.dumps(vec.astype(np.float32)), qid),
             )
 
-    db.record_run(run_id, "embed", notes=method)
-    logger.info("Embeddings: %d questions (%s)", len(ids), method)
+    db.record_run(run_id, "embed", notes=f"{method}; {len(ids)} new")
+    logger.info("Embeddings: %d new questions (%s); %d total", len(ids), method, total)
     return len(ids)

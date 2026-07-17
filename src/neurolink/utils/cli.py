@@ -146,11 +146,15 @@ def cmd_menu(_args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
+    from ..index.pipeline import get_index_counts
+
     db = Database(resolve_path(args.db))
-    with db.connect() as conn:
+    with db.connect(readonly=True) as conn:
         tables = [
             "articles",
             "article_segments",
+            "citations",
+            "article_impact",
             "questions",
             "predictions",
             "evaluations",
@@ -161,6 +165,12 @@ def cmd_status(args: argparse.Namespace) -> None:
                 print(f"{t}: {n}")
             except Exception:
                 print(f"{t}: (missing)")
+    counts = get_index_counts(args.db)
+    print(
+        f"segments_missing: {counts.segments_missing}\n"
+        f"questions_unembedded: {counts.questions_unembedded}\n"
+        f"index_ready: {counts.ready}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

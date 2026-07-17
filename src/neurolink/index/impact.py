@@ -70,7 +70,7 @@ def _fetch_missing_citations(cfg: ImpactConfig, db: Database) -> int:
     now = datetime.now(timezone.utc).isoformat()
     commit_every = max(1, cfg.commit_every)
 
-    with db.connect() as conn:
+    with db.connect(readonly=True) as conn:
         articles = conn.execute(
             """
             SELECT a.pmid, a.doi, a.year
