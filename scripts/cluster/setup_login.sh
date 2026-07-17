@@ -35,6 +35,7 @@ MODELS=(
   mistralai/Mistral-7B-v0.1
   ml4pubmed/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext_pub_section
   BrainGPT/BrainGPT-7B-v0.2
+  sentence-transformers/all-MiniLM-L6-v2
 )
 
 if command -v huggingface-cli >/dev/null 2>&1; then
