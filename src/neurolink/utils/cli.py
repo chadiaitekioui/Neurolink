@@ -90,7 +90,11 @@ def cmd_predict(args: argparse.Namespace) -> None:
 
 
 def cmd_train_literature(args: argparse.Namespace) -> None:
-    run_train_literature(args.config, year_max=args.year_max)
+    run_train_literature(
+        args.config,
+        year_max=args.year_max,
+        skip_if_exists=args.skip_if_exists,
+    )
 
 
 def cmd_train_literature_errors(args: argparse.Namespace) -> None:
@@ -225,6 +229,11 @@ def main(argv: list[str] | None = None) -> None:
     tr = sub.add_parser("train-literature", help="Train literature LoRA up to year_max")
     tr.add_argument("--config", default="config/forecast/predict_literature.yaml")
     tr.add_argument("--year-max", type=int, default=None)
+    tr.add_argument(
+        "--skip-if-exists",
+        action="store_true",
+        help="Skip training when data/models/literature/year_max_{Y}/lora/ already exists",
+    )
     tr.set_defaults(func=cmd_train_literature)
 
     tre = sub.add_parser(

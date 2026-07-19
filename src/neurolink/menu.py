@@ -838,6 +838,7 @@ def _run_compare(session: CompareSession) -> None:
                     models=cfg.models,
                     predict_config=PREDICT_COMPARE_CONFIG,
                     run_id=pred_run_id,
+                    lora_year_max=cfg.literature.benchmark_lora_year_max,
                 )
                 run_eval(eval_cfg, run_id=make_run_id("eval"))
         console.print(Panel("[bold green]✓ Benchmark done[/bold green]", border_style="green"))

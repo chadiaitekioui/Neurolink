@@ -373,12 +373,15 @@ def _train_on_examples(
     epochs: int,
     lr: float,
     use_4bit: bool,
+    log_every: int = 50,
 ) -> None:
     del use_4bit  # device_map / 4-bit: always move batches via move_inputs_to_model
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    n_ex = len(examples)
+    log_every = max(1, log_every)
     for epoch in range(epochs):
         total_loss = 0.0
-        for prompt, completion in examples:
+        for i, (prompt, completion) in enumerate(examples, start=1):
             text = prompt + " " + completion
             inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=768)
             inputs = move_inputs_to_model(inputs, model)
@@ -390,12 +393,22 @@ def _train_on_examples(
             optimizer.step()
             optimizer.zero_grad()
             total_loss += float(out.loss.item())
+            if i % log_every == 0 or i == n_ex:
+                logger.info(
+                    "LoRA epoch %d/%d — example %d/%d (%.1f%%), running avg loss=%.4f",
+                    epoch + 1,
+                    epochs,
+                    i,
+                    n_ex,
+                    100.0 * i / max(1, n_ex),
+                    total_loss / i,
+                )
         logger.info(
             "LoRA epoch %d/%d — %d examples, avg loss=%.4f",
             epoch + 1,
             epochs,
-            len(examples),
-            total_loss / max(len(examples), 1),
+            n_ex,
+            total_loss / max(n_ex, 1),
         )
 
 
@@ -430,6 +443,13 @@ def train_literature_lora(
             else None
         )
         model, tokenizer, torch = _load_train_model(cfg, continue_from)
+        logger.info(
+            "Literature LoRA training: %d examples, %d epoch(s), lr=%g, 4bit=%s",
+            len(examples),
+            cfg.train_epochs,
+            cfg.train_lr,
+            cfg.use_4bit,
+        )
         _train_on_examples(
             model,
             tokenizer,

@@ -24,6 +24,7 @@ source scripts/cluster/env.sh
 echo "=== Job 2: train LoRA 2022 ==="
 neurolink train-literature \
   --year-max 2022 \
+  --skip-if-exists \
   --config config/forecast/predict_literature.yaml
 
 echo "=== Job 2: benchmark anchor 2022 (2023-2025) ==="

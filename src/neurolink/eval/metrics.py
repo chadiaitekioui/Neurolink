@@ -27,6 +27,9 @@ class EvalConfig:
     critical_only: bool = True
     run_id: str | None = None
     predict_config: str = "config/forecast/predict_literature.yaml"
+    # Freeze literature_lora adapter at this year_max for all eval years (Job 2/3).
+    # When set, BrainBench / contamination use year_max_{lora_year_max}/lora for every N.
+    lora_year_max: int | None = None
     brainbench_enabled: bool = True
     contamination_enabled: bool = True
     brainbench_max_pairs: int = 50
@@ -53,6 +56,8 @@ def _append_metric(
 
 
 def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
+    from dataclasses import replace
+
     from ..forecast.predict.models import LLM_LITERATURE_MODELS, MODEL_LITERATURE_LORA, PredictConfig
 
     cfg = load_config(config_path, EvalConfig) if isinstance(config_path, str) else config_path
@@ -62,6 +67,17 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
 
     predict_cfg = load_config(cfg.predict_config, PredictConfig)
     lit_cfg = predict_cfg.literature
+    if cfg.lora_year_max is not None:
+        lit_cfg = replace(lit_cfg, benchmark_lora_year_max=cfg.lora_year_max)
+        logger.info(
+            "Eval: freezing literature_lora adapter at year_max=%d for all test years",
+            cfg.lora_year_max,
+        )
+    elif lit_cfg.benchmark_lora_year_max is not None:
+        logger.info(
+            "Eval: using literature.benchmark_lora_year_max=%d from predict config",
+            lit_cfg.benchmark_lora_year_max,
+        )
 
     with db.connect() as conn:
         test_years = infer_test_years(conn, cfg.test_years)

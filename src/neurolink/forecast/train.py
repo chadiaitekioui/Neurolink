@@ -43,6 +43,8 @@ def run_train_literature(
     config_path: str | Path | PredictConfig,
     year_max: int | None = None,
     run_id: str | None = None,
+    *,
+    skip_if_exists: bool = False,
 ) -> int:
     cfg = (
         load_config(config_path, PredictConfig)
@@ -62,6 +64,20 @@ def run_train_literature(
         if year_max <= 0:
             logger.warning("year_max=%d too small for LoRA training", year_max)
             return 0
+
+        if skip_if_exists and adapter_exists(cfg.literature, year_max):
+            adapter = _adapter_path(cfg.literature, year_max) / "lora"
+            logger.info(
+                "Skipping LoRA training — adapter already exists: %s",
+                adapter,
+            )
+            db.record_run(
+                run_id,
+                "train_literature",
+                notes=f"year_max={year_max}, skipped (adapter exists)",
+            )
+            return year_max
+
         n_examples = train_literature_lora(conn, year_max, cfg.literature)
 
     db.record_run(run_id, "train_literature", notes=f"year_max={year_max}, examples={n_examples}")

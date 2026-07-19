@@ -60,7 +60,7 @@ def _benchmark_and_eval(
         run_id=make_run_id(f"benchmark_{lora_year_max}"),
     )
     eval_cfg = load_config(eval_config, EvalConfig)
-    eval_cfg = replace(eval_cfg, run_id=pred_run_id)
+    eval_cfg = replace(eval_cfg, run_id=pred_run_id, lora_year_max=lora_year_max)
     run_eval(eval_cfg, run_id=make_run_id(f"eval_{lora_year_max}"))
     return pred_run_id
 
@@ -85,7 +85,12 @@ def run_complete_workflow(
         logger.info("Skipping index")
 
     logger.info("Train LoRA year_max=%d", cfg.lora_anchor_first)
-    run_train_literature(cfg.predict_config, year_max=cfg.lora_anchor_first, run_id=run_id)
+    run_train_literature(
+        cfg.predict_config,
+        year_max=cfg.lora_anchor_first,
+        run_id=run_id,
+        skip_if_exists=True,
+    )
 
     logger.info("Benchmark + eval (anchor %d)", cfg.lora_anchor_first)
     _benchmark_and_eval(
@@ -98,7 +103,12 @@ def run_complete_workflow(
         shutil.copy(summary, resolve_path("eval/summary_job2.md"))
 
     logger.info("Train LoRA year_max=%d", cfg.lora_anchor_second)
-    run_train_literature(cfg.predict_config, year_max=cfg.lora_anchor_second, run_id=run_id)
+    run_train_literature(
+        cfg.predict_config,
+        year_max=cfg.lora_anchor_second,
+        run_id=run_id,
+        skip_if_exists=True,
+    )
 
     logger.info("Benchmark + eval (anchor %d)", cfg.lora_anchor_second)
     _benchmark_and_eval(

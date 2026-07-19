@@ -9,6 +9,7 @@ models:
 semantic_threshold: 0.55
 critical_only: false
 predict_config: config/forecast/predict_compare.yaml
+lora_year_max: 2022
 brainbench_enabled: true
 contamination_enabled: true
 brainbench_max_pairs: 50
