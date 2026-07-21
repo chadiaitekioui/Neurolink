@@ -14,8 +14,10 @@
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Job 2 — Train LoRA year_max=2022, benchmark 2023-2025 (3 LLMs, temp=0), eval.
-# Prompt and temperature are fixed in config/forecast/predict_compare.yaml.
+# Job 2 — Train LoRA year_max=2022 (training v2), benchmark 2023-2025 (3 LLMs, temp=0), eval.
+# Train: config/forecast/predict_literature.yaml
+# Compare + eval inference: config/forecast/predict_compare.yaml (same llm.* as train)
+# Eval scenario: config/eval/scenarios/eval_compare_2022.yaml (lora_year_max=2022, critical_only=false)
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"

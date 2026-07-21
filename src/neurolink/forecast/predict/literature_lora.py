@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,14 @@ class LiteratureLoraConfig:
     train_lr: float = 1e-4
     train_fraction: float = 0.7
     max_examples_per_year: int = 0  # 0 = no cap; train_fraction applies
+    train_sampling: str = "impact_topk"  # impact_topk | impact_weighted
+    grad_accumulation_steps: int = 1
+    shuffle_training_examples: bool = False
+    use_hf_trainer: bool = True
+    train_save_steps: int = 0  # 0 = checkpoints disabled (final save only)
+    train_save_total_limit: int = 2
+    resume_from_checkpoint: str | None = None
+    train_log_every: int = 50
     error_train_epochs: int = 2
     error_max_examples: int = 50
     semantic_threshold: float = 0.55
@@ -37,7 +46,7 @@ class LiteratureLoraConfig:
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
 
-def _questions_by_year(conn: sqlite3.Connection, year_max: int) -> dict[int, list[str]]:
+def _questions_by_year(conn: sqlite3.Connection, year_max: int) -> dict[int, list[tuple[float, str]]]:
     rows = conn.execute(
         """
         SELECT question_text, year, impact_score FROM questions
@@ -52,20 +61,37 @@ def _questions_by_year(conn: sqlite3.Connection, year_max: int) -> dict[int, lis
             continue
         yr = int(r["year"])
         buckets.setdefault(yr, []).append((float(r["impact_score"] or 0), text))
-    by_year: dict[int, list[str]] = {}
+    by_year: dict[int, list[tuple[float, str]]] = {}
     for yr, items in buckets.items():
         items.sort(key=lambda x: (-x[0], x[1]))
-        by_year[yr] = [text for _, text in items]
+        by_year[yr] = items
     return by_year
 
 
-def _training_examples_for_year(questions: list[str], cfg: LiteratureLoraConfig) -> list[str]:
-    if not questions:
+def _training_examples_for_year(
+    scored_questions: list[tuple[float, str]],
+    cfg: LiteratureLoraConfig,
+    rng: random.Random,
+) -> list[str]:
+    if not scored_questions:
         return []
-    n_use = max(1, int(len(questions) * cfg.train_fraction))
+    n_use = max(1, int(len(scored_questions) * cfg.train_fraction))
     if cfg.max_examples_per_year > 0:
         n_use = min(n_use, cfg.max_examples_per_year)
-    return questions[:n_use]
+    n_use = min(n_use, len(scored_questions))
+
+    if cfg.train_sampling == "impact_weighted":
+        weights = [max(score, 0.0) + 1e-6 for score, _ in scored_questions]
+        available = list(range(len(scored_questions)))
+        indices: list[int] = []
+        while len(indices) < n_use and available:
+            pick_weights = [weights[i] for i in available]
+            pick = rng.choices(available, weights=pick_weights, k=1)[0]
+            indices.append(pick)
+            available.remove(pick)
+        return [scored_questions[i][1] for i in indices]
+
+    return [text for _, text in scored_questions[:n_use]]
 
 
 def _fetch_context_question_rows(
@@ -176,13 +202,32 @@ def build_temporal_examples(
 ) -> list[tuple[str, str]]:
     """(prompt, completion) pairs: context ≤ T → questions at T+1, T+1 ≤ year_max."""
     by_year = _questions_by_year(conn, year_max)
+    rng = random.Random(cfg.llm.seed)
     examples: list[tuple[str, str]] = []
+    per_target_year: dict[int, int] = {}
     for year in sorted(by_year):
         if year + 1 > year_max:
             break
         prompt = build_temporal_training_prompt(conn, year, cfg)
-        for q in _training_examples_for_year(by_year.get(year + 1, []), cfg):
+        target_year = year + 1
+        selected = _training_examples_for_year(by_year.get(target_year, []), cfg, rng)
+        per_target_year[target_year] = len(selected)
+        for q in selected:
             examples.append((prompt, q[:400]))
+    cap_note = (
+        f"max_examples_per_year={cfg.max_examples_per_year}"
+        if cfg.max_examples_per_year > 0
+        else "max_examples_per_year=0 (no cap)"
+    )
+    logger.info(
+        "Training dataset year_max=%d: %d examples, sampling=%s, %s, fraction=%.2f — by target year: %s",
+        year_max,
+        len(examples),
+        cfg.train_sampling,
+        cap_note,
+        cfg.train_fraction,
+        per_target_year,
+    )
     return examples
 
 
@@ -334,15 +379,33 @@ def infer_benchmark_years(conn: sqlite3.Connection, lora_year_max: int) -> list[
     return [int(r["year"]) for r in rows]
 
 
+def _bnb_config(cfg: LiteratureLoraConfig):
+    import torch
+    from transformers import BitsAndBytesConfig
+
+    compute_dtype = torch.float16
+    try:
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            compute_dtype = torch.bfloat16
+    except Exception:
+        pass
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+    )
+
+
 def _load_train_model(cfg: LiteratureLoraConfig, continue_from: Path | None):
     import torch
     from peft import LoraConfig, PeftModel, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     load_kwargs: dict = {}
     if cfg.use_4bit:
         try:
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+            load_kwargs["quantization_config"] = _bnb_config(cfg)
             load_kwargs["device_map"] = "auto"
         except Exception:
             pass
@@ -357,11 +420,164 @@ def _load_train_model(cfg: LiteratureLoraConfig, continue_from: Path | None):
         model = PeftModel.from_pretrained(model, str(continue_from / "lora"), is_trainable=True)
         logger.info("Continuing LoRA from %s", continue_from / "lora")
     else:
-        lora_cfg = LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, task_type="CAUSAL_LM")
+        lora_cfg = LoraConfig(
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "v_proj"],
+        )
         model = get_peft_model(model, lora_cfg)
 
     model.train()
     return model, tokenizer, torch
+
+
+def _prepare_training_examples(
+    examples: list[tuple[str, str]],
+    cfg: LiteratureLoraConfig,
+) -> list[tuple[str, str]]:
+    prepared = list(examples)
+    if cfg.shuffle_training_examples and len(prepared) > 1:
+        rng = random.Random(cfg.llm.seed)
+        rng.shuffle(prepared)
+    return prepared
+
+
+def _find_latest_checkpoint(checkpoint_dir: Path) -> str | None:
+    if not checkpoint_dir.is_dir():
+        return None
+    checkpoints = sorted(
+        checkpoint_dir.glob("checkpoint-*"),
+        key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1,
+    )
+    return str(checkpoints[-1]) if checkpoints else None
+
+
+def _resolve_resume_checkpoint(cfg: LiteratureLoraConfig, year_max: int) -> str | None:
+    if cfg.resume_from_checkpoint:
+        path = Path(cfg.resume_from_checkpoint)
+        if path.is_dir():
+            return str(path)
+        logger.warning("resume_from_checkpoint not found: %s", path)
+        return None
+    return _find_latest_checkpoint(_adapter_path(cfg, year_max) / "checkpoints")
+
+
+class _PromptCompletionDataset:
+    def __init__(
+        self,
+        examples: list[tuple[str, str]],
+        tokenizer,
+        *,
+        max_length: int = 768,
+    ) -> None:
+        self.examples = examples
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> dict:
+        prompt, completion = self.examples[idx]
+        text = prompt + " " + completion
+        encoded = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_length,
+            padding=False,
+        )
+        prompt_ids = self.tokenizer(
+            prompt,
+            truncation=True,
+            max_length=self.max_length,
+            add_special_tokens=True,
+        )["input_ids"]
+        labels = encoded["input_ids"].copy()
+        prompt_len = min(len(prompt_ids), len(labels))
+        labels[:prompt_len] = [-100] * prompt_len
+        return {
+            "input_ids": encoded["input_ids"],
+            "attention_mask": encoded["attention_mask"],
+            "labels": labels,
+        }
+
+
+class _PromptMaskCollator:
+    def __init__(self, tokenizer) -> None:
+        self.tokenizer = tokenizer
+
+    def __call__(self, features: list[dict]) -> dict:
+        import torch
+
+        labels = [f["labels"] for f in features]
+        batch = self.tokenizer.pad(
+            {k: [f[k] for f in features] for k in ("input_ids", "attention_mask")},
+            padding=True,
+            return_tensors="pt",
+        )
+        max_len = batch["input_ids"].shape[1]
+        padded_labels = []
+        for row in labels:
+            padded = row + [-100] * (max_len - len(row))
+            padded_labels.append(padded[:max_len])
+        batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+        return batch
+
+
+def _train_with_hf_trainer(
+    model,
+    tokenizer,
+    examples: list[tuple[str, str]],
+    *,
+    cfg: LiteratureLoraConfig,
+    year_max: int,
+    epochs: int,
+    lr: float,
+) -> None:
+    import torch
+    from transformers import Trainer, TrainingArguments
+
+    checkpoint_dir = _adapter_path(cfg, year_max) / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    resume = _resolve_resume_checkpoint(cfg, year_max)
+    save_steps = cfg.train_save_steps if cfg.train_save_steps > 0 else max(10_000_000, len(examples))
+    n_accum = max(1, cfg.grad_accumulation_steps)
+
+    training_args = TrainingArguments(
+        output_dir=str(checkpoint_dir),
+        num_train_epochs=epochs,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=n_accum,
+        learning_rate=lr,
+        logging_steps=max(1, cfg.train_log_every // n_accum),
+        save_steps=save_steps,
+        save_total_limit=max(1, cfg.train_save_total_limit),
+        optim="paged_adamw_8bit",
+        fp16=torch.cuda.is_available(),
+        bf16=False,
+        report_to=[],
+        remove_unused_columns=False,
+        dataloader_pin_memory=False,
+    )
+
+    dataset = _PromptCompletionDataset(examples, tokenizer)
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=_PromptMaskCollator(tokenizer),
+    )
+    logger.info(
+        "HF Trainer: %d examples, epochs=%d, lr=%g, grad_accum=%d, save_steps=%d, resume=%s",
+        len(examples),
+        epochs,
+        lr,
+        n_accum,
+        save_steps,
+        resume or "none",
+    )
+    trainer.train(resume_from_checkpoint=resume)
 
 
 def _train_on_examples(
@@ -373,14 +589,19 @@ def _train_on_examples(
     epochs: int,
     lr: float,
     use_4bit: bool,
+    grad_accumulation_steps: int = 1,
     log_every: int = 50,
 ) -> None:
     del use_4bit  # device_map / 4-bit: always move batches via move_inputs_to_model
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     n_ex = len(examples)
+    n_accum = max(1, grad_accumulation_steps)
     log_every = max(1, log_every)
+    optimizer.zero_grad()
+    global_step = 0
     for epoch in range(epochs):
         total_loss = 0.0
+        accum_loss = 0.0
         for i, (prompt, completion) in enumerate(examples, start=1):
             text = prompt + " " + completion
             inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=768)
@@ -389,27 +610,71 @@ def _train_on_examples(
             prompt_len = len(tokenizer(prompt, truncation=True, max_length=768)["input_ids"])
             labels[0, :prompt_len] = -100
             out = model(**inputs, labels=labels)
-            out.loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            total_loss += float(out.loss.item())
-            if i % log_every == 0 or i == n_ex:
-                logger.info(
-                    "LoRA epoch %d/%d — example %d/%d (%.1f%%), running avg loss=%.4f",
-                    epoch + 1,
-                    epochs,
-                    i,
-                    n_ex,
-                    100.0 * i / max(1, n_ex),
-                    total_loss / i,
-                )
+            (out.loss / n_accum).backward()
+            accum_loss += float(out.loss.item())
+            if i % n_accum == 0 or i == n_ex:
+                optimizer.step()
+                optimizer.zero_grad()
+                global_step += 1
+                total_loss += accum_loss
+                if global_step % log_every == 0 or i == n_ex:
+                    logger.info(
+                        "LoRA epoch %d/%d — example %d/%d (step %d), running avg loss=%.4f",
+                        epoch + 1,
+                        epochs,
+                        i,
+                        n_ex,
+                        global_step,
+                        total_loss / max(global_step, 1),
+                    )
+                accum_loss = 0.0
         logger.info(
-            "LoRA epoch %d/%d — %d examples, avg loss=%.4f",
+            "LoRA epoch %d/%d — %d examples, %d optimizer steps, avg loss=%.4f",
             epoch + 1,
             epochs,
             n_ex,
-            total_loss / max(n_ex, 1),
+            global_step,
+            total_loss / max(global_step, 1),
         )
+
+
+def _run_training(
+    model,
+    tokenizer,
+    torch,
+    examples: list[tuple[str, str]],
+    *,
+    cfg: LiteratureLoraConfig,
+    year_max: int,
+    epochs: int,
+    lr: float,
+) -> None:
+    prepared = _prepare_training_examples(examples, cfg)
+    if cfg.use_hf_trainer:
+        try:
+            _train_with_hf_trainer(
+                model,
+                tokenizer,
+                prepared,
+                cfg=cfg,
+                year_max=year_max,
+                epochs=epochs,
+                lr=lr,
+            )
+            return
+        except Exception as exc:
+            logger.warning("HF Trainer failed (%s) — falling back to manual loop", exc)
+    _train_on_examples(
+        model,
+        tokenizer,
+        torch,
+        prepared,
+        epochs=epochs,
+        lr=lr,
+        use_4bit=cfg.use_4bit,
+        grad_accumulation_steps=cfg.grad_accumulation_steps,
+        log_every=cfg.train_log_every,
+    )
 
 
 def _save_adapter(model, tokenizer, cfg: LiteratureLoraConfig, year_max: int) -> Path:
@@ -444,20 +709,25 @@ def train_literature_lora(
         )
         model, tokenizer, torch = _load_train_model(cfg, continue_from)
         logger.info(
-            "Literature LoRA training: %d examples, %d epoch(s), lr=%g, 4bit=%s",
+            "Literature LoRA training: %d examples, %d epoch(s), lr=%g, 4bit=%s, "
+            "sampling=%s, grad_accum=%d, hf_trainer=%s",
             len(examples),
             cfg.train_epochs,
             cfg.train_lr,
             cfg.use_4bit,
+            cfg.train_sampling,
+            cfg.grad_accumulation_steps,
+            cfg.use_hf_trainer,
         )
-        _train_on_examples(
+        _run_training(
             model,
             tokenizer,
             torch,
             examples,
+            cfg=cfg,
+            year_max=year_max,
             epochs=cfg.train_epochs,
             lr=cfg.train_lr,
-            use_4bit=cfg.use_4bit,
         )
         out_dir = _save_adapter(model, tokenizer, cfg, year_max)
         logger.info("Literature LoRA saved: %s (%d examples)", out_dir, len(examples))
@@ -507,14 +777,15 @@ def train_literature_lora_on_errors(
             continue_from = None
 
         peft_model, tokenizer, torch = _load_train_model(cfg, continue_from)
-        _train_on_examples(
+        _run_training(
             peft_model,
             tokenizer,
             torch,
             examples,
+            cfg=cfg,
+            year_max=target_year,
             epochs=cfg.error_train_epochs,
             lr=cfg.train_lr,
-            use_4bit=cfg.use_4bit,
         )
         out_dir = _save_adapter(peft_model, tokenizer, cfg, target_year)
         logger.info(

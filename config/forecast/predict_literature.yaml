@@ -12,7 +12,14 @@ literature:
   train_epochs: 1
   train_lr: 0.0001
   train_fraction: 0.7
-  max_examples_per_year: 0
+  max_examples_per_year: 200
+  train_sampling: impact_weighted
+  grad_accumulation_steps: 16
+  shuffle_training_examples: true
+  use_hf_trainer: true
+  train_save_steps: 100
+  train_save_total_limit: 2
+  train_log_every: 50
   error_train_epochs: 2
   error_max_examples: 50
   semantic_threshold: 0.55

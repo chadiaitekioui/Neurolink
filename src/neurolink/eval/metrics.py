@@ -115,10 +115,19 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                 matcher = TfidfMatcher([r["text"] for r in refs], cfg.semantic_threshold)
                 precision_by_k: dict[int, float] = {}
                 for k in cfg.top_k:
-                    p, r = matcher.precision_recall_at_k(preds, k)
+                    p, r, r_norm = matcher.precision_recall_at_k(preds, k)
                     precision_by_k[k] = p
                     _append_metric(rows_to_insert, year=N, model=model, metric="precision@k", value=p, eval_run=eval_run, k=k)
                     _append_metric(rows_to_insert, year=N, model=model, metric="recall@k", value=r, eval_run=eval_run, k=k)
+                    _append_metric(
+                        rows_to_insert,
+                        year=N,
+                        model=model,
+                        metric="recall@k_normalized",
+                        value=r_norm,
+                        eval_run=eval_run,
+                        k=k,
+                    )
 
                 if model not in LLM_LITERATURE_MODELS:
                     continue
@@ -265,7 +274,9 @@ def write_summary(db: Database, run_id: str, path: Path) -> None:
         "paired perplexity discrimination (`brainbench_*`) and "
         "zlib–perplexity memorization ratios (`contamination_zlib_ppl_*`). "
         "`extension_vs_context` = P@k − context_recycling (legitimate extension proxy); "
-        "`extension_vs_corpus` = P@k − corpus_recycling.\n\n",
+        "`extension_vs_corpus` = P@k − corpus_recycling. "
+        "`recall@k_normalized` = R@k / min(k, N_GT) × N_GT = (# GT matchées) / min(k, N_GT) "
+        "(fraction du plafond théorique k/N_GT, bornée par 1).\n\n",
         "| Year | Model | Metric | k | Value |\n",
         "|------|-------|--------|---|-------|\n",
     ]

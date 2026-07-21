@@ -29,17 +29,20 @@ class TfidfMatcher:
         except ValueError:
             return None
 
-    def precision_recall_at_k(self, preds: list[str], k: int) -> tuple[float, float]:
+    def precision_recall_at_k(self, preds: list[str], k: int) -> tuple[float, float, float]:
         top = [p[:4000] for p in preds[:k]]
         if not top or not self.ref_texts:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         sims = self.similarity_matrix(top)
         if sims is None:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
+        n_gt = len(self.ref_texts)
+        matched = float((sims.max(axis=0) >= self._sim_threshold).sum())
         precision = float((sims.max(axis=1) >= self._sim_threshold).sum()) / len(top)
-        recall = float((sims.max(axis=0) >= self._sim_threshold).sum()) / len(self.ref_texts)
-        return precision, recall
+        recall = matched / n_gt
+        recall_normalized = matched / min(k, n_gt)
+        return precision, recall, recall_normalized
 
     def uncovered_references(self, preds: list[str], k: int) -> list[str]:
         """Ground-truth questions not semantically matched by any top-k prediction."""

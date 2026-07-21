@@ -14,8 +14,11 @@
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Job 3 — Train LoRA year_max=2025, benchmark 2026 (3 LLMs), predict 2027 (LoRA 2025).
-# predict_2027.yaml: benchmark_lora_year_max=2025, greedy temp=0, no eval for 2027.
+# Job 3 — Train LoRA year_max=2025 (training v2), benchmark 2026 (3 LLMs), predict 2027 (LoRA 2025).
+# Train: config/forecast/predict_literature.yaml (same v2 hyperparams as Job 2)
+# Compare: config/forecast/predict_compare.yaml — same 3-LLM prompt/temp as Job 2
+# Eval: config/eval/scenarios/eval_compare_2025.yaml (lora_year_max=2025, same eval flags as Job 2)
+# predict_2027.yaml: benchmark_lora_year_max=2025, greedy temp=0, no eval for 2027
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
@@ -34,6 +37,7 @@ neurolink compare \
 
 echo "=== Job 3: eval benchmark 2025 → 2026 ==="
 neurolink eval --config config/eval/scenarios/eval_compare_2025.yaml
+cp -f eval/summary.md eval/summary_job3.md
 
 echo "=== Job 3: inference 2027 (LoRA 2025, no eval) ==="
 neurolink predict --config config/forecast/scenarios/predict_2027.yaml
@@ -44,7 +48,8 @@ tar czf "$ARCHIVE" \
   data/neurolink.db \
   data/models/literature \
   eval/summary.md \
-  eval/summary_job2.md 2>/dev/null || \
+  eval/summary_job2.md \
+  eval/summary_job3.md 2>/dev/null || \
 tar czf "$ARCHIVE" data/neurolink.db data/models/literature eval/
 echo "Archive: $NEUROLINK_ROOT/$ARCHIVE"
 ls -lh "$ARCHIVE"
