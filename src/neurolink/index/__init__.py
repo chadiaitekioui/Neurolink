@@ -19,7 +19,14 @@ from .pipeline import (
     run_index,
 )
 from .segment import SegmentConfig, run_segment
-from ..utils.pubmed_clean import clean_abstract, structure_abstract
+from .subject import (
+    SubjectConfig,
+    SubjectResult,
+    compress_to_subject_span,
+    extract_subject,
+    heuristic_subjectness,
+)
+from ..utils.pubmed_clean import clean_abstract, structure_abstract, structure_abstract_sections
 from ..utils.pubmed_parse import ParsedArticle, parse_pubmed_text
 
 __all__ = [
@@ -30,14 +37,19 @@ __all__ = [
     "IndexPipelineConfig",
     "ParsedArticle",
     "SegmentConfig",
+    "SubjectConfig",
+    "SubjectResult",
     "build_search_term",
     "check_index_ready",
     "clean_abstract",
     "collect_pubmed",
+    "compress_to_subject_span",
     "esearch_pmids",
+    "extract_subject",
     "citation_rate",
     "fetch_citation_count",
     "get_index_counts",
+    "heuristic_subjectness",
     "is_index_ready",
     "years_since_publication",
     "import_pubmed_text_file",
@@ -48,4 +60,5 @@ __all__ = [
     "run_index",
     "run_segment",
     "structure_abstract",
+    "structure_abstract_sections",
 ]

@@ -1,20 +1,30 @@
-"""Fetch citation counts (OpenAlex) and label high-impact questions.
+"""Fetch citation counts (OpenAlex) and label high-impact research directions.
 
 Impact scores are normalized as citations per year since publication so articles
 from different vintages remain comparable.
+
+Propagates ``article_segments`` → ``questions`` as short *subjects*,
+with year clamp, subjectness filter, and optional impact reweighting.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import requests
 
 from ..db import Database
 from ..utils.config import load_config, make_run_id, resolve_path
+from .subject import (
+    SubjectConfig,
+    extract_subject,
+    get_subject_classifier,
+    weighted_impact,
+    year_in_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,8 @@ class ImpactConfig:
     mailto: str | None = None
     # Commit + log every N newly fetched citations (resume-safe on interrupt).
     commit_every: int = 100
+    # Subject extraction / filtering when rebuilding questions.
+    subject: SubjectConfig = field(default_factory=SubjectConfig)
 
 
 def years_since_publication(pub_year: int, ref_year: int | None = None) -> int:
@@ -139,9 +151,53 @@ def _fetch_missing_citations(cfg: ImpactConfig, db: Database) -> int:
     return fetched
 
 
+def _resolve_subject_text(
+    *,
+    segment_question: str,
+    abstract: str | None,
+    title: str | None,
+    qc_score: float | None,
+    cfg: SubjectConfig,
+    classifier,
+) -> tuple[str | None, float]:
+    """Return (subject_text, subjectness) or (None, 0) if rejected."""
+    if not cfg.enabled:
+        text = (segment_question or "").strip()
+        return (text or None, 1.0 if text else 0.0)
+
+    # Re-extract when qc missing/low or segment still looks like a long abstract blob.
+    words = len((segment_question or "").split())
+    needs_extract = (
+        qc_score is None
+        or float(qc_score) < cfg.min_subjectness
+        or words > cfg.max_words + 5
+        or words < cfg.absolute_min_words
+    )
+    if not needs_extract and segment_question.strip():
+        return segment_question.strip(), float(qc_score or 0.0)
+
+    source = (abstract or segment_question or "").strip()
+    extracted = extract_subject(
+        source,
+        cfg=cfg,
+        title=title,
+        classifier=classifier,
+    )
+    if extracted is None:
+        return None, 0.0
+    if extracted.subjectness < cfg.min_subjectness:
+        return None, extracted.subjectness
+    return extracted.text, extracted.subjectness
+
+
 def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
-    """Compute impact scores from citations and rebuild questions from segments."""
+    """Compute impact scores from citations and rebuild questions from subjects."""
     ref_year = datetime.now().year
+    subject_cfg = cfg.subject
+
+    classifier = None
+    if subject_cfg.enabled and subject_cfg.use_level2_classifier:
+        classifier = get_subject_classifier(subject_cfg.classifier_model)
 
     with db.connect() as conn:
         rows = conn.execute(
@@ -156,6 +212,8 @@ def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
         counts_by_year: dict[int, list[tuple[str, float]]] = {}
         for row in rows:
             year = int(row["year"])
+            if not year_in_range(year, subject_cfg):
+                continue
             rate = citation_rate(int(row["citation_count"]), year, ref_year)
             counts_by_year.setdefault(year, []).append((row["pmid"], rate))
 
@@ -181,14 +239,59 @@ def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
         conn.execute("DELETE FROM questions")
         segments = conn.execute(
             """
-            SELECT s.pmid, s.question, a.year, i.impact_score, i.is_critical
+            SELECT s.pmid, s.question, s.qc_score, s.results,
+                   a.year, a.title, a.abstract, a.text_work,
+                   i.impact_score, i.is_critical
             FROM article_segments s
             JOIN articles a ON s.pmid = a.pmid
             LEFT JOIN article_impact i ON s.pmid = i.pmid
             WHERE s.question IS NOT NULL AND TRIM(s.question) != ''
             """
         ).fetchall()
+
+        n_kept = 0
+        n_dropped_year = 0
+        n_dropped_subject = 0
         for seg in segments:
+            year = seg["year"]
+            if year is None or not year_in_range(int(year), subject_cfg):
+                n_dropped_year += 1
+                continue
+
+            abstract = (seg["text_work"] or seg["abstract"] or "").strip()
+            subject_text, subjectness = _resolve_subject_text(
+                segment_question=seg["question"] or "",
+                abstract=abstract,
+                title=seg["title"],
+                qc_score=seg["qc_score"],
+                cfg=subject_cfg,
+                classifier=classifier,
+            )
+            if not subject_text:
+                n_dropped_subject += 1
+                continue
+
+            # Persist refined subject + qc back onto the segment for resume/debug.
+            conn.execute(
+                """
+                UPDATE article_segments
+                SET question = ?, qc_score = ?,
+                    segmentation_method = CASE
+                        WHEN COALESCE(segmentation_method, '') LIKE '%+subject' THEN segmentation_method
+                        ELSE COALESCE(segmentation_method, 'hybrid') || '+subject'
+                    END,
+                    updated_at = ?
+                WHERE pmid = ?
+                """,
+                (
+                    subject_text,
+                    subjectness,
+                    datetime.now(timezone.utc).isoformat(),
+                    seg["pmid"],
+                ),
+            )
+
+            impact = weighted_impact(seg["impact_score"], subjectness, subject_cfg)
             conn.execute(
                 """
                 INSERT INTO questions (pmid, question_text, year, impact_score, is_critical)
@@ -196,14 +299,26 @@ def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
                 """,
                 (
                     seg["pmid"],
-                    seg["question"],
-                    seg["year"],
-                    seg["impact_score"],
+                    subject_text,
+                    int(year),
+                    impact,
                     seg["is_critical"] or 0,
                 ),
             )
+            n_kept += 1
 
-    return len(segments)
+        logger.info(
+            "Impact subjects: kept=%d dropped_year=%d dropped_subject=%d "
+            "(year_range=%d-%d, min_subjectness=%.2f)",
+            n_kept,
+            n_dropped_year,
+            n_dropped_subject,
+            subject_cfg.year_min,
+            subject_cfg.year_max,
+            subject_cfg.min_subjectness,
+        )
+
+    return n_kept
 
 
 def run_impact(config_path: str | ImpactConfig, run_id: str | None = None) -> int:
@@ -215,6 +330,6 @@ def run_impact(config_path: str | ImpactConfig, run_id: str | None = None) -> in
     _fetch_missing_citations(cfg, db)
     n = _score_and_propagate(cfg, db)
 
-    db.record_run(run_id, "impact", notes=f"{n} questions")
-    logger.info("Impact: %d questions propagated", n)
+    db.record_run(run_id, "impact", notes=f"{n} subjects")
+    logger.info("Impact: %d subjects propagated", n)
     return n

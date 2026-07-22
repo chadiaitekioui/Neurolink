@@ -223,8 +223,16 @@ def clean_abstract(text: str, title: str | None = None) -> str:
     return _strip_inline_noise(cleaned)
 
 
+_DOI_OR_PMID = re.compile(r"(?i)(?:\bdoi\s*:|\bpmid\s*:|\bpmcid\s*:)")
+_COMMENT_IN = re.compile(r"\bComment in\b", re.IGNORECASE)
+_CONTRIB_EQ = re.compile(r"\(#\)?\s*Contributed equally\b", re.IGNORECASE)
+_COLLABORATORS = re.compile(r"\bCollaborators?\s*:", re.IGNORECASE)
+_UPDATE_BIORXIV = re.compile(r"\bUpdate of\s+(?:bioRxiv|medRxiv)\b", re.IGNORECASE)
+_HEAVY_AUTHOR_INDEX = re.compile(r"(?:\([#\d]+\)){2,}|\([#\d]+\)(?:\([#\d]+\))+")
+
+
 def is_junk_sentence(sentence: str) -> bool:
-    """Drop residual metadata before BERT."""
+    """Drop residual metadata before BERT / subject extraction."""
     s = _normalize_ws(sentence)
     if len(s) < 12:
         return True
@@ -236,6 +244,18 @@ def is_junk_sentence(sentence: str) -> bool:
         return True
     if _AFFILIATION_KEYWORDS.search(s) and not _SCIENTIFIC_PROSE.search(s):
         return True
+    if _DOI_OR_PMID.search(s):
+        return True
+    if _COMMENT_IN.search(s):
+        return True
+    if _CONTRIB_EQ.search(s):
+        return True
+    if _COLLABORATORS.search(s):
+        return True
+    if _UPDATE_BIORXIV.search(s):
+        return True
+    if _HEAVY_AUTHOR_INDEX.search(s) and s.count("(") >= 3:
+        return True
     return False
 
 
@@ -244,10 +264,11 @@ def polish_segment_field(text: str) -> str:
     return _strip_inline_noise(text)
 
 
-def structure_abstract(text: str) -> list[tuple[str, Bucket | None]]:
-    """Rules: split on IMRaD headers; return (content, bucket hint).
+def structure_abstract_sections(text: str) -> list[tuple[str, Bucket | None, str | None]]:
+    """Rules: split on IMRaD headers; return (content, bucket hint, section name).
 
     bucket hint is set when a header is found; None means BERT must classify.
+    section is e.g. OBJECTIVES / BACKGROUND / METHODS, or None for preamble.
     """
     if not text or not text.strip():
         return []
@@ -255,12 +276,12 @@ def structure_abstract(text: str) -> list[tuple[str, Bucket | None]]:
     text = _normalize_section_layout(text)
     matches = list(SECTION_HEADER.finditer(text))
     if not matches:
-        return [(text.strip(), None)]
+        return [(text.strip(), None, None)]
 
-    chunks: list[tuple[str, Bucket | None]] = []
+    chunks: list[tuple[str, Bucket | None, str | None]] = []
     preamble = _normalize_ws(text[: matches[0].start()])
     if preamble and not _is_metadata_line(preamble):
-        chunks.append((preamble, None))
+        chunks.append((preamble, None, None))
 
     for i, match in enumerate(matches):
         header = _normalize_header(match.group(1))
@@ -270,8 +291,13 @@ def structure_abstract(text: str) -> list[tuple[str, Bucket | None]]:
         content = _strip_inline_noise(_normalize_ws(text[start:end]))
         if not content or bucket is None:
             continue
-        chunks.append((content, bucket))
+        chunks.append((content, bucket, header))
     return chunks
+
+
+def structure_abstract(text: str) -> list[tuple[str, Bucket | None]]:
+    """Rules: split on IMRaD headers; return (content, bucket hint)."""
+    return [(content, bucket) for content, bucket, _section in structure_abstract_sections(text)]
 
 
 def body_starts_at_section(lines: list[str], start: int) -> int:

@@ -1,4 +1,4 @@
-"""Literature approach — LoRA-tuned LLM generates novel research questions."""
+"""Literature approach — LoRA-tuned LLM generates novel research directions."""
 
 from __future__ import annotations
 
@@ -8,8 +8,14 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...eval.matching import TfidfMatcher
-from .llm_core import CausalLMConfig, generate_questions, move_inputs_to_model, release_gpu_memory
+from ...eval.matching import make_matcher
+from .llm_core import (
+    CausalLMConfig,
+    generate_directions_batch,
+    generate_directions_iterative,
+    move_inputs_to_model,
+    release_gpu_memory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +43,18 @@ class LiteratureLoraConfig:
     train_log_every: int = 50
     error_train_epochs: int = 2
     error_max_examples: int = 50
-    semantic_threshold: float = 0.55
+    semantic_threshold: float = 0.50  # MiniLM cosine (as-is); TF-IDF ablation uses offset in matcher
+    matcher_backend: str = "minilm"  # minilm | tfidf
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     error_critical_only: bool = True
     braingpt_model: str = "BrainGPT/BrainGPT-7B-v0.2"
     benchmark_lora_year_max: int | None = None  # compare: fixed LoRA adapter for all benchmark years
     context_year_max: int | None = None  # override context horizon (default: target_year - 1)
     training_prompt_k: int = 1  # k in training prompts (one completion per example)
+    # Inference: iterative (k=1 × N, aligned with train) or batch (one shot for N lines).
+    generation_mode: str = "iterative"  # iterative | batch
+    filter_outputs: bool = True
+    max_generation_attempts_factor: float = 2.0
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
 
@@ -158,24 +170,37 @@ def build_generation_prompt(
     *,
     k: int,
     context_year: int | None = None,
+    already: list[str] | None = None,
 ) -> str:
-    """Shared forecast prompt — identical for literature_lora, mistral_base, and braingpt."""
+    """Shared forecast prompt — identical for literature_lora, mistral_base, and braingpt.
+
+    Targets are short *research directions* (subjects), not interrogative questions.
+    """
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
     context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
+    avoid = ""
+    if already:
+        lines = "\n".join(f"- {a}" for a in already[-15:])
+        avoid = (
+            "\nALREADY PROPOSED (do not repeat or closely paraphrase):\n"
+            f"{lines}\n"
+        )
     return (
         "You are a neuroscience research forecaster.\n\n"
-        f"CONTEXT (research questions published until {ctx_year}, ranked by impact):\n"
-        f"{context}\n\n"
-        f"TASK: Propose exactly {k} novel research questions likely to be studied in {target_year}.\n\n"
+        f"CONTEXT (research directions published until {ctx_year}, ranked by impact):\n"
+        f"{context}\n"
+        f"{avoid}\n"
+        f"TASK: Propose exactly {k} novel research directions likely to be studied in {target_year}.\n\n"
         "CONSTRAINTS:\n"
-        "- Each question: one line, 20-200 words, must end with \"?\"\n"
+        "- Each direction: one line, 8-25 words, noun-phrase style (no question mark)\n"
         f"- Number lines 1. through {k}. only\n"
-        "- Do NOT copy or paraphrase closely any question from CONTEXT\n"
+        "- Do NOT copy or paraphrase closely any direction from CONTEXT\n"
+        "- Do NOT include doi, PMID, author lists, or year tags like [YYYY]\n"
         "- Mix extensions of existing themes and genuinely emergent directions\n\n"
         "OUTPUT FORMAT (no preamble, no explanation):\n"
-        f"1. <question>?\n"
+        f"1. <research direction>\n"
         f"...\n"
-        f"{k}. <question>?\n"
+        f"{k}. <research direction>\n"
     )
 
 
@@ -320,7 +345,12 @@ def build_error_examples(
         )
         missed = refs
     else:
-        matcher = TfidfMatcher(refs, cfg.semantic_threshold)
+        matcher = make_matcher(
+            refs,
+            cfg.semantic_threshold,
+            backend=cfg.matcher_backend,
+            model_name=cfg.embed_model,
+        )
         missed = matcher.uncovered_references(preds, k=eval_k)
 
     if not missed:
@@ -812,6 +842,8 @@ def resolve_literature_llm_cfg(
         base_model=cfg.base_model,
         use_4bit=cfg.use_4bit,
         max_new_tokens=cfg.llm.max_new_tokens,
+        tokens_per_direction=cfg.llm.tokens_per_direction,
+        num_return_sequences=cfg.llm.num_return_sequences,
         temperature=cfg.llm.temperature,
         top_p=cfg.llm.top_p,
         seed=cfg.llm.seed,
@@ -859,15 +891,43 @@ def predict_literature_lm(
     *,
     model: str = "literature_lora",
 ) -> list[tuple[str, float]]:
-    """Generate novel questions for year N with a literature LM variant."""
+    """Generate novel research directions for year N with a literature LM variant."""
     year_max = N - 1
     context_year = resolve_context_year(N, cfg)
-    prompt = build_generation_prompt(conn, N, cfg, k=k, context_year=context_year)
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
+    mode = (cfg.generation_mode or "iterative").lower().strip()
 
     try:
-        oversample = 1 if cfg.llm.temperature <= 0.0 else 3
-        return generate_questions(prompt, llm_cfg, k, oversample=oversample)
+        if mode == "batch":
+            prompt = build_generation_prompt(
+                conn, N, cfg, k=k, context_year=context_year
+            )
+            oversample = 1 if cfg.llm.temperature <= 0.0 else 3
+            return generate_directions_batch(
+                prompt,
+                llm_cfg,
+                k,
+                oversample=oversample,
+                apply_filter=cfg.filter_outputs,
+            )
+
+        def _builder(n_req: int, already: list[str]) -> str:
+            return build_generation_prompt(
+                conn,
+                N,
+                cfg,
+                k=n_req,
+                context_year=context_year,
+                already=already,
+            )
+
+        return generate_directions_iterative(
+            _builder,
+            llm_cfg,
+            k,
+            apply_filter=cfg.filter_outputs,
+            attempts_factor=cfg.max_generation_attempts_factor,
+        )
     except ImportError as e:
         logger.error("%s: %s — pip install -e '.[train]'", model, e)
         return []

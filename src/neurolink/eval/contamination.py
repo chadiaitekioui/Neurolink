@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..forecast.predict.llm_core import CausalLMConfig
-from .matching import TfidfMatcher
+from .matching import make_matcher
 from .perplexity import collect_zlib_ppl_ratios, summarize_zlib_ppl_ratios
 
 if TYPE_CHECKING:
@@ -58,10 +58,15 @@ def _semantic_recycling_rate(
     predictions: list[str],
     corpus: list[str],
     threshold: float,
+    *,
+    backend: str = "minilm",
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> float:
     if not predictions or not corpus:
         return 0.0
-    matcher = TfidfMatcher(corpus, threshold)
+    matcher = make_matcher(
+        corpus, threshold, backend=backend, model_name=model_name
+    )
     sim_threshold = matcher._sim_threshold
     recycled = 0
     for pred in predictions:
@@ -90,10 +95,19 @@ def _eval_questions(conn: sqlite3.Connection, year: int) -> list[str]:
     return [(r["question_text"] or "").strip() for r in rows if (r["question_text"] or "").strip()]
 
 
-def _train_eval_overlap(train_completions: list[str], eval_questions: list[str], threshold: float) -> float:
+def _train_eval_overlap(
+    train_completions: list[str],
+    eval_questions: list[str],
+    threshold: float,
+    *,
+    backend: str = "minilm",
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+) -> float:
     if not eval_questions or not train_completions:
         return 0.0
-    matcher = TfidfMatcher(train_completions, threshold)
+    matcher = make_matcher(
+        train_completions, threshold, backend=backend, model_name=model_name
+    )
     sim_threshold = matcher._sim_threshold
     matched = 0
     for q in eval_questions:
@@ -111,14 +125,21 @@ def run_contamination_audit(
     predictions: list[str],
     lit_cfg: LiteratureLoraConfig,
     llm_cfg: CausalLMConfig,
-    semantic_threshold: float = 0.55,
+    semantic_threshold: float = 0.50,
     corpus_sample_size: int = 200,
     seed: int = 42,
     include_train_overlap: bool = True,
+    matcher_backend: str | None = None,
+    embed_model: str | None = None,
 ) -> ContaminationReport | None:
-    """Measure LoRA contamination relative to the indexed question corpus."""
+    """Measure LoRA contamination relative to the indexed subject corpus."""
     if not predictions:
         return None
+
+    backend = matcher_backend or getattr(lit_cfg, "matcher_backend", "minilm")
+    model_name = embed_model or getattr(
+        lit_cfg, "embed_model", "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     corpus = _corpus_questions_before_year(conn, target_year)
     train_completions = (
@@ -132,6 +153,10 @@ def run_contamination_audit(
 
     rng = random.Random(seed)
     corpus_sample = corpus if len(corpus) <= corpus_sample_size else rng.sample(corpus, corpus_sample_size)
+    # Cap train refs for MiniLM cost; TF-IDF handles larger sets but sampling keeps parity.
+    train_sample = train_completions
+    if len(train_completions) > 5000:
+        train_sample = rng.sample(train_completions, 5000)
 
     ref_stats = summarize_zlib_ppl_ratios(corpus_sample, llm_cfg)
     corpus_ratios = collect_zlib_ppl_ratios(corpus_sample, llm_cfg)
@@ -143,13 +168,29 @@ def run_contamination_audit(
     )
 
     return ContaminationReport(
-        corpus_recycling_rate=_semantic_recycling_rate(predictions, corpus, semantic_threshold),
+        corpus_recycling_rate=_semantic_recycling_rate(
+            predictions,
+            corpus_sample,
+            semantic_threshold,
+            backend=backend,
+            model_name=model_name,
+        ),
         context_recycling_rate=_semantic_recycling_rate(
-            predictions, context_questions, semantic_threshold
+            predictions,
+            context_questions,
+            semantic_threshold,
+            backend=backend,
+            model_name=model_name,
         ),
         context_verbatim_recycling_rate=_verbatim_rate(predictions, context_questions),
         train_eval_overlap_rate=(
-            _train_eval_overlap(train_completions, eval_questions, semantic_threshold)
+            _train_eval_overlap(
+                train_sample,
+                eval_questions,
+                semantic_threshold,
+                backend=backend,
+                model_name=model_name,
+            )
             if include_train_overlap
             else 0.0
         ),

@@ -1,9 +1,9 @@
 db_path: data/neurolink.db
 term: "cortex neuroscience"
 year_from: 2000
-year_to: 2026
+year_to: 2027
 exclude_reviews: true
-# PubMed cap; 100k leaves margin for partial 2026 on top of 2000-2025 corpus
+# PubMed cap; margin for partial recent years on top of 2000–2026 corpus
 retmax: 100000
 batch_size: 200
 delay_seconds: 0.34

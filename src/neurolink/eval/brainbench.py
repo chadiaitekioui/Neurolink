@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 BRAINBENCH_PREFIX = (
     "You are a neuroscientist with deep knowledge in neuroscience. "
-    "Here is a research question from a neuroscience publication: "
+    "Here is a research direction from a neuroscience publication: "
 )
 
 

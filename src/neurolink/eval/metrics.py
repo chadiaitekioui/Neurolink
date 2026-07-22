@@ -1,4 +1,4 @@
-"""Evaluation: TF-IDF P@k/R@k, BrainBench perplexity discrimination, LoRA contamination."""
+"""Evaluation: MiniLM P@k/R@k, BrainBench perplexity discrimination, LoRA contamination."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from ..db import Database
 from ..utils.config import infer_test_years, load_config, make_run_id, resolve_path
 from .brainbench import run_brainbench_year
 from .contamination import run_contamination_audit
-from .matching import TfidfMatcher
+from .matching import make_matcher
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,15 @@ class EvalConfig:
     models: list[str] = field(
         default_factory=lambda: ["random", "frequency", "literature_lora"]
     )
-    semantic_threshold: float = 0.55
+    # MiniLM cosine threshold (as-is). TF-IDF ablation still applies offset inside TfidfMatcher.
+    semantic_threshold: float = 0.50
+    matcher_backend: str = "minilm"  # minilm | tfidf
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     critical_only: bool = True
+    # Drop GT lines that look like metadata / abstract junk.
+    filter_gt_noise: bool = True
+    # If n_preds < min_pred_coverage * k, skip publishing P@k/R@k (still emit coverage + format).
+    min_pred_coverage: float = 0.5
     run_id: str | None = None
     predict_config: str = "config/forecast/predict_literature.yaml"
     # Freeze literature_lora adapter at this year_max for all eval years (Job 2/3).
@@ -81,10 +88,14 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
 
     with db.connect() as conn:
         test_years = infer_test_years(conn, cfg.test_years)
-        pred_row = cfg.run_id or conn.execute(
-            "SELECT run_id FROM runs WHERE stage='predict' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        pred_run_id = pred_row["run_id"] if pred_row else None
+        pred_run_id = cfg.run_id
+        if not pred_run_id:
+            pred_row = conn.execute(
+                "SELECT run_id FROM runs WHERE stage='predict' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            pred_run_id = pred_row["run_id"] if pred_row else None
+
+        from ..forecast.predict.direction_filter import format_compliance, is_clean_gt_text
 
         for model in cfg.models:
             for N in test_years:
@@ -92,13 +103,21 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                     "SELECT question_text, embedding, is_critical FROM questions WHERE year = ?",
                     (N,),
                 ).fetchall()
-                refs = []
+                refs: list[dict] = []
                 for r in ref_rows:
                     if cfg.critical_only and not r["is_critical"]:
                         continue
-                    refs.append({"text": r["question_text"]})
+                    text = r["question_text"] or ""
+                    if cfg.filter_gt_noise and not is_clean_gt_text(text):
+                        continue
+                    refs.append({"text": text})
                 if not refs:
+                    # Fallback: critical_only / noise filter emptied the pool.
                     refs = [{"text": r["question_text"]} for r in ref_rows]
+                    if cfg.filter_gt_noise:
+                        cleaned = [x for x in refs if is_clean_gt_text(x["text"] or "")]
+                        if cleaned:
+                            refs = cleaned
 
                 pred_rows = conn.execute(
                     """
@@ -112,9 +131,72 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                 if not preds or not refs:
                     continue
 
-                matcher = TfidfMatcher([r["text"] for r in refs], cfg.semantic_threshold)
+                fc = format_compliance(preds)
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="format_frac_valid",
+                    value=fc.frac_valid, eval_run=eval_run,
+                )
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="format_frac_noise",
+                    value=fc.frac_noise, eval_run=eval_run,
+                )
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="format_frac_word_len_ok",
+                    value=fc.frac_word_len_ok, eval_run=eval_run,
+                )
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="format_frac_with_doi",
+                    value=fc.frac_with_doi, eval_run=eval_run,
+                )
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="format_mean_words",
+                    value=fc.mean_words, eval_run=eval_run,
+                )
+                _append_metric(
+                    rows_to_insert, year=N, model=model, metric="n_predictions",
+                    value=float(len(preds)), eval_run=eval_run,
+                )
+
+                matcher = make_matcher(
+                    [r["text"] for r in refs],
+                    cfg.semantic_threshold,
+                    backend=cfg.matcher_backend,
+                    model_name=cfg.embed_model,
+                )
                 precision_by_k: dict[int, float] = {}
                 for k in cfg.top_k:
+                    coverage = min(1.0, len(preds) / float(k)) if k > 0 else 0.0
+                    _append_metric(
+                        rows_to_insert,
+                        year=N,
+                        model=model,
+                        metric="pred_coverage@k",
+                        value=coverage,
+                        eval_run=eval_run,
+                        k=k,
+                    )
+                    if coverage < cfg.min_pred_coverage:
+                        logger.warning(
+                            "Skip P@k/R@k for %s year=%d k=%d: pred_coverage=%.2f < %.2f "
+                            "(n_preds=%d)",
+                            model,
+                            N,
+                            k,
+                            coverage,
+                            cfg.min_pred_coverage,
+                            len(preds),
+                        )
+                        _append_metric(
+                            rows_to_insert,
+                            year=N,
+                            model=model,
+                            metric="precision@k_skipped",
+                            value=1.0,
+                            eval_run=eval_run,
+                            k=k,
+                        )
+                        continue
+
                     p, r, r_norm = matcher.precision_recall_at_k(preds, k)
                     precision_by_k[k] = p
                     _append_metric(rows_to_insert, year=N, model=model, metric="precision@k", value=p, eval_run=eval_run, k=k)
@@ -166,6 +248,8 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                         semantic_threshold=cfg.semantic_threshold,
                         corpus_sample_size=cfg.contamination_corpus_sample,
                         include_train_overlap=(model == MODEL_LITERATURE_LORA),
+                        matcher_backend=cfg.matcher_backend,
+                        embed_model=cfg.embed_model,
                     )
                     if report:
                         _append_metric(
@@ -189,27 +273,28 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                             value=report.verbatim_recycling_rate, eval_run=eval_run,
                         )
                         primary_k = max(cfg.top_k) if cfg.top_k else 50
-                        p_primary = precision_by_k.get(primary_k, 0.0)
-                        extension_vs_context = p_primary - report.context_recycling_rate
-                        extension_vs_corpus = p_primary - report.corpus_recycling_rate
-                        _append_metric(
-                            rows_to_insert,
-                            year=N,
-                            model=model,
-                            metric="extension_vs_context",
-                            value=extension_vs_context,
-                            eval_run=eval_run,
-                            k=primary_k,
-                        )
-                        _append_metric(
-                            rows_to_insert,
-                            year=N,
-                            model=model,
-                            metric="extension_vs_corpus",
-                            value=extension_vs_corpus,
-                            eval_run=eval_run,
-                            k=primary_k,
-                        )
+                        p_primary = precision_by_k.get(primary_k)
+                        if p_primary is not None:
+                            extension_vs_context = p_primary - report.context_recycling_rate
+                            extension_vs_corpus = p_primary - report.corpus_recycling_rate
+                            _append_metric(
+                                rows_to_insert,
+                                year=N,
+                                model=model,
+                                metric="extension_vs_context",
+                                value=extension_vs_context,
+                                eval_run=eval_run,
+                                k=primary_k,
+                            )
+                            _append_metric(
+                                rows_to_insert,
+                                year=N,
+                                model=model,
+                                metric="extension_vs_corpus",
+                                value=extension_vs_corpus,
+                                eval_run=eval_run,
+                                k=primary_k,
+                            )
                         if report.zlib_ppl_pred_mean is not None:
                             _append_metric(
                                 rows_to_insert, year=N, model=model, metric="contamination_zlib_ppl_pred_mean",
@@ -227,14 +312,16 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                             )
                         logger.info(
                             "Contamination %d: corpus_recycling=%.3f context_recycling=%.3f "
-                            "train_eval_overlap=%.3f verbatim=%.3f extension_vs_context=%.3f "
+                            "train_eval_overlap=%.3f verbatim=%.3f extension_vs_context=%s "
                             "zlib_ppl_pred_high=%s",
                             N,
                             report.corpus_recycling_rate,
                             report.context_recycling_rate,
                             report.train_eval_overlap_rate,
                             report.verbatim_recycling_rate,
-                            extension_vs_context,
+                            f"{(p_primary - report.context_recycling_rate):.3f}"
+                            if p_primary is not None
+                            else "n/a",
                             f"{report.zlib_ppl_pred_high_rate:.3f}" if report.zlib_ppl_pred_high_rate is not None else "n/a",
                         )
 
@@ -273,8 +360,13 @@ def write_summary(db: Database, run_id: str, path: Path) -> None:
         "Metrics follow Luo et al. (2025) BrainBench where noted: "
         "paired perplexity discrimination (`brainbench_*`) and "
         "zlib–perplexity memorization ratios (`contamination_zlib_ppl_*`). "
+        "P@k/R@k use MiniLM cosine by default (`matcher_backend: minilm`). "
         "`extension_vs_context` = P@k − context_recycling (legitimate extension proxy); "
         "`extension_vs_corpus` = P@k − corpus_recycling. "
+        "`pred_coverage@k` = min(1, n_preds/k); if below `min_pred_coverage`, P@k/R@k are skipped "
+        "(`precision@k_skipped=1`). "
+        "`format_*` metrics track research-direction validity (noise, DOI, word length). "
+        "GT noise can be dropped via `filter_gt_noise`. "
         "`recall@k_normalized` = R@k / min(k, N_GT) × N_GT = (# GT matchées) / min(k, N_GT) "
         "(fraction du plafond théorique k/N_GT, bornée par 1).\n\n",
         "| Year | Model | Metric | k | Value |\n",

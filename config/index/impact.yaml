@@ -1,3 +1,16 @@
 db_path: data/neurolink.db
 critical_percentile: 0.90
 delay_seconds: 0.1
+# Rebuild questions as research-direction subjects
+subject:
+  enabled: true
+  min_words: 8
+  max_words: 25
+  absolute_min_words: 5
+  min_subjectness: 0.35
+  year_min: 2000
+  year_max: 2027
+  use_level2_classifier: true
+  classifier_model: sentence-transformers/all-MiniLM-L6-v2
+  weight_impact_by_subjectness: true
+  impact_subjectness_floor: 0.15

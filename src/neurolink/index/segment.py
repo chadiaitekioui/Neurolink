@@ -1,16 +1,26 @@
-"""Segment abstracts: rules (structure) + PubMedBERT (bucket assignment)."""
+"""Segment abstracts: rules (structure) + PubMedBERT + subject extraction.
+
+Stores a short research-direction *subject* in ``article_segments.question``
+with ``qc_score`` = subjectness in [0, 1].
+"""
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..db import Database
-from ..utils.pubmed_clean import Bucket, is_junk_sentence, polish_segment_field, structure_abstract
+from ..utils.pubmed_clean import (
+    Bucket,
+    is_junk_sentence,
+    polish_segment_field,
+    structure_abstract_sections,
+)
 from ..utils.config import load_config, make_run_id, resolve_path
 from ..utils.torch_device import resolve_torch_device
+from .subject import SubjectClassifier, SubjectConfig, extract_subject, get_subject_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +43,8 @@ class SegmentConfig:
     device: str = "cpu"  # cpu | cuda | auto (auto: use CUDA when available)
     # Commit every N newly segmented articles (resume-safe on interrupt).
     commit_every: int = 100
+    # Extract research-direction subjects (rules + prototype classifier).
+    subject: SubjectConfig = field(default_factory=SubjectConfig)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -70,18 +82,18 @@ def _bert_bucket(
     return BERT_TO_BUCKET.get(label)
 
 
-def segment_abstract(
+def _bucket_parts(
     text: str,
     tokenizer,
     model,
     id2label: dict[int, str],
     device: str,
 ) -> tuple[str, str]:
-    """Rules split IMRaD sections; BERT classifies unstructured sentences."""
+    """Split abstract into question-bucket + results-bucket text (pre-subject)."""
     question_parts: list[str] = []
     results_parts: list[str] = []
 
-    for content, hint in structure_abstract(text):
+    for content, hint, _section in structure_abstract_sections(text):
         if hint is not None:
             (question_parts if hint == "question" else results_parts).append(content)
             continue
@@ -104,7 +116,53 @@ def segment_abstract(
             elif bucket == "results":
                 results_parts.append(sent)
 
-    return polish_segment_field(" ".join(question_parts)), polish_segment_field(" ".join(results_parts))
+    return (
+        polish_segment_field(" ".join(question_parts)),
+        polish_segment_field(" ".join(results_parts)),
+    )
+
+
+def segment_abstract(
+    text: str,
+    tokenizer,
+    model,
+    id2label: dict[int, str],
+    device: str = "cpu",
+    *,
+    title: str | None = None,
+    subject_cfg: SubjectConfig | None = None,
+    classifier: SubjectClassifier | None = None,
+) -> tuple[str, str, float | None]:
+    """Rules + BERT buckets, then subject extraction into a short research direction.
+
+    Returns ``(subject_or_question, results, qc_score)``.
+    ``qc_score`` is subjectness when extraction succeeds, else None.
+    """
+    question_bucket, results = _bucket_parts(text, tokenizer, model, id2label, device)
+    cfg = subject_cfg or SubjectConfig()
+
+    if not cfg.enabled:
+        return question_bucket, results, None
+
+    # Prefer extracting from full abstract (section labels) when available.
+    source = text if text.strip() else question_bucket
+    extracted = extract_subject(
+        source,
+        cfg=cfg,
+        title=title,
+        classifier=classifier,
+    )
+    if extracted is None and question_bucket:
+        extracted = extract_subject(
+            question_bucket,
+            cfg=cfg,
+            title=title,
+            classifier=classifier,
+        )
+    if extracted is None:
+        # Keep cleaned bucket as fallback (may be filtered later at impact).
+        return question_bucket, results, 0.0
+    return extracted.text, results, extracted.subjectness
 
 
 def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> int:
@@ -118,7 +176,7 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
     with db.connect(readonly=True) as conn:
         articles = conn.execute(
             """
-            SELECT a.pmid, a.abstract, a.text_work
+            SELECT a.pmid, a.title, a.abstract, a.text_work
             FROM articles a
             LEFT JOIN article_segments s ON a.pmid = s.pmid
             WHERE s.pmid IS NULL
@@ -155,20 +213,38 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
             "segment requires transformers and torch — pip install -e ."
         ) from e
 
+    classifier = None
+    if cfg.subject.enabled and cfg.subject.use_level2_classifier:
+        classifier = get_subject_classifier(cfg.subject.classifier_model)
+
     n = 0
+    n_subjects = 0
     with db.connect() as conn:
         for row in articles:
             text = (row["text_work"] or row["abstract"] or "").strip()
-            question, results = segment_abstract(text, tokenizer, model, id2label, device)
+            subject, results, qc = segment_abstract(
+                text,
+                tokenizer,
+                model,
+                id2label,
+                device,
+                title=row["title"],
+                subject_cfg=cfg.subject,
+                classifier=classifier,
+            )
+            method = "hybrid+subject" if cfg.subject.enabled else "hybrid"
+            if qc is not None and qc > 0:
+                n_subjects += 1
             conn.execute(
                 """
                 INSERT INTO article_segments (pmid, question, results, segmentation_method, qc_score, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pmid) DO UPDATE SET
                     question=excluded.question, results=excluded.results,
-                    segmentation_method=excluded.segmentation_method, updated_at=excluded.updated_at
+                    segmentation_method=excluded.segmentation_method,
+                    qc_score=excluded.qc_score, updated_at=excluded.updated_at
                 """,
-                (row["pmid"], question, results, "hybrid", None, now),
+                (row["pmid"], subject, results, method, qc, now),
             )
             n += 1
             if n % commit_every == 0:
@@ -181,6 +257,15 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
                     100.0 * done / max(1, total_articles),
                 )
 
-    db.record_run(run_id, "segment", notes=f"{n} new / {already + n} total")
-    logger.info("Segmentation: %d new articles (%d total)", n, already + n)
+    db.record_run(
+        run_id,
+        "segment",
+        notes=f"{n} new / {already + n} total; subjects={n_subjects}",
+    )
+    logger.info(
+        "Segmentation: %d new articles (%d total); subjects extracted=%d",
+        n,
+        already + n,
+        n_subjects,
+    )
     return n

@@ -2,19 +2,19 @@
 
 Modular pipeline to forecast emergent neuroscience research directions from PubMed literature.
 
-**Literature LoRA**: fine-tune Mistral-7B on temporal question pairs, with benchmark against Mistral-7B base and BrainGPT.
+**Literature LoRA**: fine-tune Mistral-7B on temporal direction pairs, with benchmark against Mistral-7B base and BrainGPT.
 
-![image](neurolink.png)
+image
 
 ## Why these models?
 
-Neurolink compares three 7B-scale causal LMs on the same forecast task: propose novel neuroscience research questions for a target year, given impact-ranked context from prior years. The trio isolates three hypotheses:
+Neurolink compares three 7B-scale causal LMs on the same forecast task: propose novel neuroscience **research directions** for a target year, given impact-ranked context from prior years. The trio isolates three hypotheses:
 
 
 | Model             | Hypothesis tested                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------ |
 | `mistral_base`    | A general-purpose LLM already captures temporal research trends without domain fine-tuning |
-| `literature_lora` | Temporal LoRA on indexed question pairs teaches the model to forecast what comes next      |
+| `literature_lora` | Temporal LoRA on indexed direction pairs teaches the model to forecast what comes next     |
 | `braingpt`        | A neuroscience-specialized pre-training (BrainGPT) outperforms raw Mistral                 |
 
 
@@ -22,15 +22,13 @@ Neurolink compares three 7B-scale causal LMs on the same forecast task: propose 
 
 ### Capabilities
 
-All three models share identical generation prompts and inference settings (`temperature: 0`, greedy decoding) so differences reflect model knowledge, not prompt engineering.
+All three models share identical generation prompts and inference settings (`temperature: 0`, greedy decoding, iterative k=1 generation by default) so differences reflect model knowledge, not prompt engineering.
 
-- **Mistral-7B-v0.1** (`mistral_base`): open general-purpose baseline; no adapter, no domain bias. Serves as the null hypothesis: can a stock LLM forecast emergent neuroscience directions from context alone?
-- **Literature LoRA** (`literature_lora`): Mistral-7B + a LoRA adapter trained on temporal pairs (context ≤ year *T* → questions at *T+1*). The adapter is frozen at anchor `year_max` to simulate real forecast conditions where the model cannot see future literature.
-- **BrainGPT-7B-v0.2** (`braingpt`): domain LLM pre-trained on neuroscience text ([BrainGPT](https://huggingface.co/BrainGPT/BrainGPT-7B-v0.2)). Tests whether broad neuro-domain knowledge transfers better than corpus-specific temporal fine-tuning.
+- **Mistral-7B-v0.1** (`mistral_base`): open general-purpose baseline; no adapter, no domain bias.
+- **Literature LoRA** (`literature_lora`): Mistral-7B + a LoRA adapter trained on temporal pairs (context ≤ year *T* → directions at *T+1*). The adapter is frozen at anchor `year_max` to simulate real forecast conditions.
+- **BrainGPT-7B-v0.2** (`braingpt`): domain LLM pre-trained on neuroscience text ([BrainGPT](https://huggingface.co/BrainGPT/BrainGPT-7B-v0.2)).
 
-At inference, each model receives up to 40 high-impact questions as context, generates *k* novel questions (20–200 words, must end with `?`), and ranks candidates by completion likelihood. GPU + 4-bit quantization required for training and benchmark stages.
-
-Full protocol (index → dual LoRA anchors → benchmark → eval → forecast): see **[Protocol.md](Protocol.md)**.
+At inference, each model receives up to 40 high-impact directions as context, generates *k* short research directions (about 8–25 words, noun-phrase style, no `?`), filters junk outputs, and ranks candidates by completion likelihood. GPU + 4-bit quantization required for training and benchmark stages.
 
 ## Installation
 
@@ -51,7 +49,7 @@ python -m neurolink menu
 
 Menu: **Index → LoRA → Benchmark → Complete workflow (GPU) → Status**.
 
-![image](CLI.png)
+image
 
 Or run the full protocol in one command (GPU required):
 

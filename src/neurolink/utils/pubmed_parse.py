@@ -114,7 +114,7 @@ def _infer_year(block: str) -> int | None:
     m3 = re.search(r"\b(20\d{2})\b", block[:400])
     if m3:
         y = int(m3.group(1))
-        if 1990 <= y <= 2030:
+        if 2000 <= y <= 2027:
             return y
     return None
 

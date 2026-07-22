@@ -8,10 +8,14 @@ models:
 seed: 42
 literature:
   adapter_dir: data/models/literature
-  max_context_questions: 25
+  max_context_questions: 40
   backend: lora
   use_4bit: true
+  generation_mode: iterative
+  filter_outputs: true
   llm:
     max_new_tokens: 96
-    temperature: 0.75
-    top_p: 0.9
+    tokens_per_direction: 48
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42

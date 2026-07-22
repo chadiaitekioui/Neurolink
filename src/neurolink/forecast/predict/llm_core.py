@@ -1,10 +1,13 @@
-"""Causal LM question generation for literature predictors."""
+"""Causal LM generation for literature research directions."""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from .direction_filter import filter_directions, is_valid_direction, strip_list_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +53,10 @@ class CausalLMConfig:
     adapter_path: str | None = None  # local lora/ dir or Hub id (BrainGPT/...)
     use_4bit: bool = True
     max_new_tokens: int = 80
+    # Tokens budget per single research direction (iterative mode / scaling base).
+    tokens_per_direction: int = 48
     num_return_sequences: int = 1
-    temperature: float = 0.7
+    temperature: float = 0.0
     top_p: float = 0.9
     seed: int = 42
 
@@ -91,7 +96,6 @@ def _load_model(cfg: CausalLMConfig) -> tuple[object, object]:
         if adapter_path.is_dir():
             model = PeftModel.from_pretrained(model, str(adapter_path))
         elif "/" in adapter_ref and not adapter_path.exists():
-            # Hugging Face Hub adapter id (e.g. BrainGPT/BrainGPT-7B-v0.2)
             model = PeftModel.from_pretrained(model, adapter_ref)
         else:
             raise FileNotFoundError(
@@ -103,16 +107,12 @@ def _load_model(cfg: CausalLMConfig) -> tuple[object, object]:
     return model, tokenizer
 
 
-def parse_generated_questions(text: str, min_len: int = 25) -> list[str]:
-    """Parse generated questions (numbered lines or bullets)."""
+def parse_generated_directions(text: str, min_len: int = 15) -> list[str]:
+    """Parse generated research directions (numbered lines or bullets)."""
     out: list[str] = []
     seen: set[str] = set()
     for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        line = re.sub(r"^\d+[\.\):\-]\s*", "", line)
-        line = re.sub(r"^[-*•]\s*", "", line)
+        line = strip_list_prefix(raw)
         if len(line) < min_len:
             continue
         key = line.lower()
@@ -120,7 +120,16 @@ def parse_generated_questions(text: str, min_len: int = 25) -> list[str]:
             continue
         seen.add(key)
         out.append(line)
+    # Fallback: single-line blob without newlines.
+    if not out:
+        blob = strip_list_prefix(text.replace("\n", " "))
+        if len(blob) >= min_len:
+            out.append(blob)
     return out
+
+
+# Backward-compatible alias
+parse_generated_questions = parse_generated_directions
 
 
 def score_completion(prompt: str, completion: str, cfg: CausalLMConfig) -> float:
@@ -153,20 +162,83 @@ def sequence_perplexity(text: str, cfg: CausalLMConfig, *, max_length: int = 204
     return math.exp(float(out.loss.item()))
 
 
-def generate_questions(
+def _generate_raw(
+    prompt: str,
+    cfg: CausalLMConfig,
+    *,
+    max_new_tokens: int,
+    n_seq: int,
+    do_sample: bool,
+) -> list[str]:
+    import torch
+
+    model, tokenizer = _load_model(cfg)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = move_inputs_to_model(inputs, model)
+
+    gen_kwargs: dict = {"do_sample": do_sample}
+    if do_sample:
+        gen_kwargs["temperature"] = max(cfg.temperature, 1e-5)
+        gen_kwargs["top_p"] = cfg.top_p
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            num_return_sequences=n_seq,
+            pad_token_id=tokenizer.pad_token_id,
+            **gen_kwargs,
+        )
+
+    decoded: list[str] = []
+    prompt_len = inputs["input_ids"].shape[1]
+    for seq in outputs:
+        decoded.append(tokenizer.decode(seq[prompt_len:], skip_special_tokens=True))
+    return decoded
+
+
+def _score_unique(
+    prompt: str,
+    candidates: list[str],
+    cfg: CausalLMConfig,
+    *,
+    apply_filter: bool,
+) -> list[tuple[str, float]]:
+    if apply_filter:
+        candidates = filter_directions(candidates)
+    else:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for c in candidates:
+            s = strip_list_prefix(c)
+            key = s.lower()
+            if not s or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(s)
+        candidates = cleaned
+
+    scored: list[tuple[str, float]] = []
+    for q in candidates:
+        try:
+            s = score_completion(prompt, q, cfg)
+        except Exception:
+            s = 0.0
+        scored.append((q, s))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
+def generate_directions_batch(
     prompt: str,
     cfg: CausalLMConfig,
     n: int,
     *,
     oversample: int = 2,
+    apply_filter: bool = True,
 ) -> list[tuple[str, float]]:
-    """Generate n novel questions (no corpus recycling)."""
+    """Batch generation: one (or few) sequences aiming for n numbered directions."""
     import torch
-
-    model, tokenizer = _load_model(cfg)
-
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    inputs = move_inputs_to_model(inputs, model)
 
     greedy = cfg.temperature <= 0.0
     if greedy:
@@ -174,45 +246,110 @@ def generate_questions(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.seed)
         n_seq = 1
-        gen_kwargs = {"do_sample": False}
+        do_sample = False
     else:
-        n_seq = min(max(n * oversample, n + 2), 8)
-        gen_kwargs = {
-            "do_sample": True,
-            "temperature": cfg.temperature,
-            "top_p": cfg.top_p,
-        }
+        n_seq = min(max(n * oversample, n + 2), max(cfg.num_return_sequences, 8))
+        do_sample = True
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=cfg.max_new_tokens * max(2, n // 2),
-            num_return_sequences=n_seq,
-            pad_token_id=tokenizer.pad_token_id,
-            **gen_kwargs,
-        )
+    # ~tokens_per_direction per requested line, with a floor for short lists.
+    per = max(16, int(cfg.tokens_per_direction))
+    max_new = min(2048, max(cfg.max_new_tokens, per * max(n, 1)))
 
+    raw_outputs = _generate_raw(
+        prompt, cfg, max_new_tokens=max_new, n_seq=n_seq, do_sample=do_sample
+    )
     candidates: list[str] = []
-    for seq in outputs:
-        decoded = tokenizer.decode(seq[inputs["input_ids"].shape[1] :], skip_special_tokens=True)
-        candidates.extend(parse_generated_questions(decoded))
+    for decoded in raw_outputs:
+        candidates.extend(parse_generated_directions(decoded))
 
-    if not candidates:
-        full = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        candidates = parse_generated_questions(full[len(prompt) :])
+    if not candidates and raw_outputs:
+        candidates = parse_generated_directions(raw_outputs[0])
 
-    scored: list[tuple[str, float]] = []
+    scored = _score_unique(prompt, candidates, cfg, apply_filter=apply_filter)
+    return scored[:n]
+
+
+# Backward-compatible alias
+generate_questions = generate_directions_batch
+
+
+def generate_directions_iterative(
+    prompt_builder: Callable[[int, list[str]], str],
+    cfg: CausalLMConfig,
+    n: int,
+    *,
+    apply_filter: bool = True,
+    attempts_factor: float = 2.0,
+) -> list[tuple[str, float]]:
+    """Generate n directions with k=1 prompts (aligned with training_prompt_k=1).
+
+    ``prompt_builder(k, already)`` must return a full prompt requesting ``k`` items.
+    """
+    import torch
+
+    collected: list[tuple[str, float]] = []
+    already: list[str] = []
+    max_attempts = max(n, int(n * max(attempts_factor, 1.0)))
+    per_tokens = max(24, int(cfg.tokens_per_direction))
+    greedy = cfg.temperature <= 0.0
+
+    for attempt in range(max_attempts):
+        if len(collected) >= n:
+            break
+        prompt = prompt_builder(1, already)
+        if greedy:
+            torch.manual_seed(cfg.seed + attempt)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(cfg.seed + attempt)
+            n_seq = 1
+            do_sample = False
+        else:
+            n_seq = min(3, max(1, cfg.num_return_sequences))
+            do_sample = True
+
+        raw_outputs = _generate_raw(
+            prompt, cfg, max_new_tokens=per_tokens, n_seq=n_seq, do_sample=do_sample
+        )
+        candidates: list[str] = []
+        for decoded in raw_outputs:
+            candidates.extend(parse_generated_directions(decoded, min_len=12))
+
+        for cand in candidates:
+            s = strip_list_prefix(cand)
+            if apply_filter and not is_valid_direction(s):
+                continue
+            if not s:
+                continue
+            key = s.lower()
+            if key in {a.lower() for a in already}:
+                continue
+            try:
+                score = score_completion(prompt, s, cfg)
+            except Exception:
+                score = 0.0
+            collected.append((s, score))
+            already.append(s)
+            if len(collected) >= n:
+                break
+
+    collected.sort(key=lambda x: x[1], reverse=True)
+    # Keep first-n by score but preserve diversity already enforced via `already`.
+    # Re-sort only the final list for ranking consistency.
+    best: list[tuple[str, float]] = []
     seen: set[str] = set()
-    for q in candidates:
-        key = q.lower()
+    for text, score in collected:
+        key = text.lower()
         if key in seen:
             continue
         seen.add(key)
-        try:
-            s = score_completion(prompt, q, cfg)
-        except Exception:
-            s = 0.0
-        scored.append((q, s))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored[:n]
+        best.append((text, score))
+        if len(best) >= n:
+            break
+    logger.info(
+        "Iterative generation: %d/%d valid directions (attempts=%d, filter=%s)",
+        len(best),
+        n,
+        max_attempts,
+        apply_filter,
+    )
+    return best

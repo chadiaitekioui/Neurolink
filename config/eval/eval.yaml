@@ -5,8 +5,12 @@ models:
   - random
   - frequency
   - literature_lora
-semantic_threshold: 0.55
-critical_only: false
+semantic_threshold: 0.50
+matcher_backend: minilm
+embed_model: sentence-transformers/all-MiniLM-L6-v2
+critical_only: true
+filter_gt_noise: true
+min_pred_coverage: 0.5
 predict_config: config/forecast/predict_literature.yaml
 brainbench_enabled: true
 contamination_enabled: true

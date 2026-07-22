@@ -7,7 +7,9 @@ db_path: data/neurolink.db
 test_years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
 critical_percentile: 0.90
 top_k: [10, 50, 100]
-semantic_threshold: 0.55
+semantic_threshold: 0.50
+matcher_backend: minilm
+embed_model: sentence-transformers/all-MiniLM-L6-v2
 
 emergence_weights:
   growth: 0.35
