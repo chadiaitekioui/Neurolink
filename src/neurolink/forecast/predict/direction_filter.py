@@ -18,6 +18,47 @@ _HERE_WE = re.compile(
     r"\b(?:here,?\s+we|we (?:found|show(?:ed)?|demonstrate(?:d)?|used))\b",
     re.IGNORECASE,
 )
+# Prompt / rubric leakage seen in Job 2 v3–v4 generations.
+_PROMPT_LEAK = re.compile(
+    r"(?i)\b(?:"
+    r"TASK\s*:|"
+    r"OUTPUT\s+FORMAT|"
+    r"CONSTRAINTS\s*:|"
+    r"ALREADY\s+PROPOSED|"
+    r"Propose\s+exactly|"
+    r"Propose\s+\d+\s+research|"
+    r"research\s+directions?\s+likely\s+to\s+be\s+studied|"
+    r"\d+\s+points?\s+for\s+each|"
+    r"points?\s+for\s+each\s+direction|"
+    r"noun-phrase\s+style|"
+    r"Do\s+NOT\s+(?:copy|include|repeat)|"
+    r"Each\s+direction\s*:\s*one\s+line|"
+    r"Mix\s+extensions\s+of\s+existing|"
+    r"year\s+tags\s+like|"
+    r"no\s+preamble|"
+    r"<research\s+direction>|"
+    r"Style\s+examples|"
+    r"Prior\s+themes|"
+    r"Already\s+listed|"
+    r"Numbered\s+list\s+only|"
+    r"published\s+in\s+20\d{2}\b|"
+    r"not\s+published|"
+    r"any\s+other\s+participant|"
+    r"plausible,?\s+and\s+interesting|"
+    r"direct\s+extension\s+of\s+a\s+direction\s+in\s+CONTEXT"
+    r")\b"
+)
+_INSTRUCTION_LINE = re.compile(
+    r"(?i)^(CONTEXT|Prior themes|Write (?:exactly|up to)|Numbered list only|Neuroscience forecast)\b"
+)
+# Exact copies of prompt few-shots (must stay in sync with literature_lora._STYLE_EXAMPLES).
+_STYLE_FEWSHOT_BLOCKLIST = frozenset(
+    {
+        "role of cerebellar nuclei in top-down motor cortex control",
+        "microglial modulation of synaptic pruning during development",
+        "prefrontal dopamine signaling in flexible decision making",
+    }
+)
 
 
 @dataclass
@@ -42,10 +83,26 @@ def strip_list_prefix(line: str) -> str:
     return line.strip()
 
 
+def is_prompt_leak(text: str) -> bool:
+    """True if the line is instruction / scoring-rubric text rather than a direction."""
+    s = strip_list_prefix(text)
+    if not s:
+        return True
+    if s.lower() in _STYLE_FEWSHOT_BLOCKLIST:
+        return True
+    if _PROMPT_LEAK.search(s):
+        return True
+    if _INSTRUCTION_LINE.match(s):
+        return True
+    return False
+
+
 def is_noise_direction(text: str) -> bool:
-    """True if the line looks like metadata / corpus junk."""
+    """True if the line looks like metadata / corpus junk / prompt leakage."""
     s = (text or "").strip()
     if not s:
+        return True
+    if is_prompt_leak(s):
         return True
     if _YEAR_PREFIX.match(s):
         return True

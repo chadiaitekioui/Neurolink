@@ -55,6 +55,8 @@ class CausalLMConfig:
     max_new_tokens: int = 80
     # Tokens budget per single research direction (iterative mode / scaling base).
     tokens_per_direction: int = 48
+    # Prompt truncate for generate (V100-32g + 4-bit: 4096 + 2048 new fits Mistral 8k).
+    prompt_max_length: int = 4096
     num_return_sequences: int = 1
     temperature: float = 0.0
     top_p: float = 0.9
@@ -173,7 +175,18 @@ def _generate_raw(
     import torch
 
     model, tokenizer = _load_model(cfg)
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    # Keep the end of the prompt (instructions + open "1.") if truncating.
+    trunc_side = getattr(tokenizer, "truncation_side", "right")
+    tokenizer.truncation_side = "left"
+    try:
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max(512, int(cfg.prompt_max_length)),
+        )
+    finally:
+        tokenizer.truncation_side = trunc_side
     inputs = move_inputs_to_model(inputs, model)
 
     gen_kwargs: dict = {"do_sample": do_sample}

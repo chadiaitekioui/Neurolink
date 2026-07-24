@@ -10,7 +10,7 @@ seed: 42
 literature:
   adapter_dir: data/models/literature
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
-  max_context_questions: 40
+  max_context_questions: 20
   backend: lora
   use_4bit: true
   train_epochs: 1
@@ -31,7 +31,7 @@ literature:
   embed_model: sentence-transformers/all-MiniLM-L6-v2
   error_critical_only: true
   training_prompt_k: 1
-  generation_mode: iterative
+  generation_mode: batch
   filter_outputs: true
   max_generation_attempts_factor: 2.0
   llm:

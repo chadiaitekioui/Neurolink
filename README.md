@@ -28,7 +28,7 @@ All three models share identical generation prompts and inference settings (`tem
 - **Literature LoRA** (`literature_lora`): Mistral-7B + a LoRA adapter trained on temporal pairs (context ≤ year *T* → directions at *T+1*). The adapter is frozen at anchor `year_max` to simulate real forecast conditions.
 - **BrainGPT-7B-v0.2** (`braingpt`): domain LLM pre-trained on neuroscience text ([BrainGPT](https://huggingface.co/BrainGPT/BrainGPT-7B-v0.2)).
 
-At inference, each model receives up to 40 high-impact directions as context, generates *k* short research directions (about 8–25 words, noun-phrase style, no `?`), filters junk outputs, and ranks candidates by completion likelihood. GPU + 4-bit quantization required for training and benchmark stages.
+At inference, each model receives up to 20 high-impact directions as context, generates *k* short research directions (about 8–25 words, noun-phrase style, no `?`), filters junk outputs, and ranks candidates by completion likelihood. GPU + 4-bit quantization required for training and benchmark stages.
 
 ## Installation
 

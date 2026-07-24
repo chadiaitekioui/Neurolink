@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class LiteratureLoraConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
     adapter_dir: str = "data/models/literature"
-    max_context_questions: int = 40
+    max_context_questions: int = 20
     lora_r: int = 16
     lora_alpha: int = 32
     use_4bit: bool = True
@@ -52,7 +52,7 @@ class LiteratureLoraConfig:
     context_year_max: int | None = None  # override context horizon (default: target_year - 1)
     training_prompt_k: int = 1  # k in training prompts (one completion per example)
     # Inference: iterative (k=1 × N, aligned with train) or batch (one shot for N lines).
-    generation_mode: str = "iterative"  # iterative | batch
+    generation_mode: str = "batch"  # batch | iterative
     filter_outputs: bool = True
     max_generation_attempts_factor: float = 2.0
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
@@ -163,6 +163,14 @@ def resolve_context_year(target_year: int, cfg: LiteratureLoraConfig) -> int:
     return target_year - 1
 
 
+# Fixed few-shots (style only; not taken from the year-specific CONTEXT).
+_STYLE_EXAMPLES = (
+    "Role of cerebellar nuclei in top-down motor cortex control",
+    "Microglial modulation of synaptic pruning during development",
+    "Prefrontal dopamine signaling in flexible decision making",
+)
+
+
 def build_generation_prompt(
     conn: sqlite3.Connection,
     target_year: int,
@@ -174,33 +182,29 @@ def build_generation_prompt(
 ) -> str:
     """Shared forecast prompt — identical for literature_lora, mistral_base, and braingpt.
 
-    Targets are short *research directions* (subjects), not interrogative questions.
+    Short instruction + style examples; ends with ``1.`` so the model continues a
+    direction rather than regenerating TASK/CONSTRAINTS blocks.
     """
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
     context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
+    examples = "\n".join(f"- {ex}" for ex in _STYLE_EXAMPLES)
     avoid = ""
     if already:
         lines = "\n".join(f"- {a}" for a in already[-15:])
-        avoid = (
-            "\nALREADY PROPOSED (do not repeat or closely paraphrase):\n"
-            f"{lines}\n"
-        )
+        avoid = f"\nAlready listed (do not repeat):\n{lines}\n"
+    # End on an open "1." so greedy continuation fills the direction body.
     return (
-        "You are a neuroscience research forecaster.\n\n"
-        f"CONTEXT (research directions published until {ctx_year}, ranked by impact):\n"
+        "Neuroscience forecast.\n\n"
+        f"Prior themes (until {ctx_year}, by impact):\n"
         f"{context}\n"
         f"{avoid}\n"
-        f"TASK: Propose exactly {k} novel research directions likely to be studied in {target_year}.\n\n"
-        "CONSTRAINTS:\n"
-        "- Each direction: one line, 8-25 words, noun-phrase style (no question mark)\n"
-        f"- Number lines 1. through {k}. only\n"
-        "- Do NOT copy or paraphrase closely any direction from CONTEXT\n"
-        "- Do NOT include doi, PMID, author lists, or year tags like [YYYY]\n"
-        "- Mix extensions of existing themes and genuinely emergent directions\n\n"
-        "OUTPUT FORMAT (no preamble, no explanation):\n"
-        f"1. <research direction>\n"
-        f"...\n"
-        f"{k}. <research direction>\n"
+        "Style examples (different topics; do not reuse wording):\n"
+        f"{examples}\n\n"
+        f"Write exactly {k} novel research directions for {target_year}.\n"
+        "Rules: one numbered line each; 8-25 words; noun phrase; no '?'; "
+        "no doi/PMID/years; do not copy Prior themes or Style examples.\n"
+        "Numbered list only — start now:\n"
+        "1."
     )
 
 
@@ -843,6 +847,7 @@ def resolve_literature_llm_cfg(
         use_4bit=cfg.use_4bit,
         max_new_tokens=cfg.llm.max_new_tokens,
         tokens_per_direction=cfg.llm.tokens_per_direction,
+        prompt_max_length=cfg.llm.prompt_max_length,
         num_return_sequences=cfg.llm.num_return_sequences,
         temperature=cfg.llm.temperature,
         top_p=cfg.llm.top_p,
@@ -895,7 +900,7 @@ def predict_literature_lm(
     year_max = N - 1
     context_year = resolve_context_year(N, cfg)
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
-    mode = (cfg.generation_mode or "iterative").lower().strip()
+    mode = (cfg.generation_mode or "batch").lower().strip()
 
     try:
         if mode == "batch":
