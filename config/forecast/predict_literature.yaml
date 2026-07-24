@@ -20,6 +20,10 @@ literature:
   train_save_steps: 100
   train_save_total_limit: 2
   train_log_every: 50
+  train_val_fraction: 0.1
+  train_eval_steps: 100
+  train_early_stopping_patience: 3
+  train_max_length: 1024
   error_train_epochs: 2
   error_max_examples: 50
   semantic_threshold: 0.50

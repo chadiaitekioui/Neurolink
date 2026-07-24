@@ -41,6 +41,11 @@ class LiteratureLoraConfig:
     train_save_total_limit: int = 2
     resume_from_checkpoint: str | None = None
     train_log_every: int = 50
+    # Train monitoring: held-out slice of temporal pairs (all ≤ year_max; never test years).
+    train_val_fraction: float = 0.1
+    train_eval_steps: int = 0  # 0 → same as train_save_steps (or 50)
+    train_early_stopping_patience: int = 3  # 0 = disabled
+    train_max_length: int = 1024
     error_train_epochs: int = 2
     error_max_examples: int = 50
     semantic_threshold: float = 0.50  # MiniLM cosine (as-is); TF-IDF ablation uses offset in matcher
@@ -497,13 +502,33 @@ def _resolve_resume_checkpoint(cfg: LiteratureLoraConfig, year_max: int) -> str 
     return _find_latest_checkpoint(_adapter_path(cfg, year_max) / "checkpoints")
 
 
+def _split_train_val(
+    examples: list[tuple[str, str]],
+    val_fraction: float,
+    seed: int,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Random split; examples must already exclude future test years (≤ year_max)."""
+    if val_fraction <= 0.0 or len(examples) < 10:
+        return examples, []
+    frac = min(0.5, max(0.0, float(val_fraction)))
+    n_val = max(1, int(round(len(examples) * frac)))
+    n_val = min(n_val, len(examples) // 2)
+    rng = random.Random(seed)
+    order = list(range(len(examples)))
+    rng.shuffle(order)
+    val_idx = set(order[:n_val])
+    train = [examples[i] for i in order if i not in val_idx]
+    val = [examples[i] for i in order if i in val_idx]
+    return train, val
+
+
 class _PromptCompletionDataset:
     def __init__(
         self,
         examples: list[tuple[str, str]],
         tokenizer,
         *,
-        max_length: int = 768,
+        max_length: int = 1024,
     ) -> None:
         self.examples = examples
         self.tokenizer = tokenizer
@@ -513,26 +538,48 @@ class _PromptCompletionDataset:
         return len(self.examples)
 
     def __getitem__(self, idx: int) -> dict:
+        """Pack prompt+completion so the completion is never truncated away (fixes loss=0)."""
         prompt, completion = self.examples[idx]
-        text = prompt + " " + completion
-        encoded = self.tokenizer(
-            text,
+        completion = (completion or "").strip()
+        # Reserve room for completion tokens; left-truncate the prompt if needed.
+        comp_ids = self.tokenizer(
+            " " + completion,
             truncation=True,
-            max_length=self.max_length,
-            padding=False,
-        )
-        prompt_ids = self.tokenizer(
-            prompt,
-            truncation=True,
-            max_length=self.max_length,
-            add_special_tokens=True,
+            max_length=max(32, self.max_length // 4),
+            add_special_tokens=False,
         )["input_ids"]
-        labels = encoded["input_ids"].copy()
-        prompt_len = min(len(prompt_ids), len(labels))
+        budget = max(16, self.max_length - len(comp_ids))
+        trunc_side = getattr(self.tokenizer, "truncation_side", "right")
+        self.tokenizer.truncation_side = "left"
+        try:
+            prompt_ids = self.tokenizer(
+                prompt,
+                truncation=True,
+                max_length=budget,
+                add_special_tokens=True,
+            )["input_ids"]
+        finally:
+            self.tokenizer.truncation_side = trunc_side
+
+        input_ids = prompt_ids + comp_ids
+        if len(input_ids) > self.max_length:
+            overflow = len(input_ids) - self.max_length
+            input_ids = input_ids[overflow:]
+            prompt_len = max(0, len(prompt_ids) - overflow)
+        else:
+            prompt_len = len(prompt_ids)
+
+        labels = list(input_ids)
         labels[:prompt_len] = [-100] * prompt_len
+        if all(x == -100 for x in labels):
+            # Safety: if masking wiped everything, supervise last tokens.
+            keep = min(16, len(labels))
+            labels[-keep:] = input_ids[-keep:]
+
+        attention_mask = [1] * len(input_ids)
         return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
             "labels": labels,
         }
 
@@ -570,15 +617,35 @@ def _train_with_hf_trainer(
     lr: float,
 ) -> None:
     import torch
-    from transformers import Trainer, TrainingArguments
+    from transformers import EarlyStoppingCallback, Trainer, TrainingArguments
 
     checkpoint_dir = _adapter_path(cfg, year_max) / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     resume = _resolve_resume_checkpoint(cfg, year_max)
-    save_steps = cfg.train_save_steps if cfg.train_save_steps > 0 else max(10_000_000, len(examples))
     n_accum = max(1, cfg.grad_accumulation_steps)
+    max_len = max(256, int(cfg.train_max_length))
 
-    training_args = TrainingArguments(
+    train_ex, val_ex = _split_train_val(
+        examples, cfg.train_val_fraction, cfg.llm.seed + year_max
+    )
+    use_val = len(val_ex) >= 2
+    if use_val:
+        # Need periodic saves to pick best checkpoint (HF: save_steps % eval_steps == 0).
+        eval_steps = (
+            cfg.train_eval_steps
+            if cfg.train_eval_steps > 0
+            else (cfg.train_save_steps if cfg.train_save_steps > 0 else 50)
+        )
+        eval_steps = max(1, eval_steps)
+        save_steps = cfg.train_save_steps if cfg.train_save_steps > 0 else eval_steps
+        save_steps = max(eval_steps, save_steps)
+        if save_steps % eval_steps != 0:
+            save_steps = ((save_steps + eval_steps - 1) // eval_steps) * eval_steps
+    else:
+        save_steps = cfg.train_save_steps if cfg.train_save_steps > 0 else max(10_000_000, len(examples))
+        eval_steps = save_steps
+
+    args_kwargs: dict = dict(
         output_dir=str(checkpoint_dir),
         num_train_epochs=epochs,
         per_device_train_batch_size=1,
@@ -594,24 +661,67 @@ def _train_with_hf_trainer(
         remove_unused_columns=False,
         dataloader_pin_memory=False,
     )
+    # transformers ≥4.41 uses eval_strategy; older uses evaluation_strategy.
+    if use_val:
+        args_kwargs.update(
+            {
+                "eval_strategy": "steps",
+                "eval_steps": eval_steps,
+                "save_strategy": "steps",
+                "load_best_model_at_end": True,
+                "metric_for_best_model": "eval_loss",
+                "greater_is_better": False,
+                "per_device_eval_batch_size": 1,
+            }
+        )
+    try:
+        training_args = TrainingArguments(**args_kwargs)
+    except TypeError:
+        if use_val:
+            args_kwargs.pop("eval_strategy", None)
+            args_kwargs["evaluation_strategy"] = "steps"
+        training_args = TrainingArguments(**args_kwargs)
 
-    dataset = _PromptCompletionDataset(examples, tokenizer)
+    train_ds = _PromptCompletionDataset(train_ex, tokenizer, max_length=max_len)
+    eval_ds = (
+        _PromptCompletionDataset(val_ex, tokenizer, max_length=max_len) if use_val else None
+    )
+    callbacks = []
+    if use_val and cfg.train_early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=max(1, cfg.train_early_stopping_patience)
+            )
+        )
+
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
         data_collator=_PromptMaskCollator(tokenizer),
+        callbacks=callbacks or None,
     )
     logger.info(
-        "HF Trainer: %d examples, epochs=%d, lr=%g, grad_accum=%d, save_steps=%d, resume=%s",
-        len(examples),
+        "HF Trainer: train=%d val=%d epochs=%d lr=%g grad_accum=%d "
+        "save_steps=%d eval_steps=%s early_stop=%s resume=%s",
+        len(train_ex),
+        len(val_ex),
         epochs,
         lr,
         n_accum,
         save_steps,
+        eval_steps if use_val else "off",
+        cfg.train_early_stopping_patience if use_val else "off",
         resume or "none",
     )
     trainer.train(resume_from_checkpoint=resume)
+    if use_val and getattr(trainer.state, "best_metric", None) is not None:
+        logger.info(
+            "Best checkpoint: step=%s eval_loss=%s",
+            getattr(trainer.state, "best_global_step", None),
+            trainer.state.best_metric,
+        )
 
 
 def _train_on_examples(
