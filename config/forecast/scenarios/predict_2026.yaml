@@ -12,8 +12,9 @@ literature:
   use_4bit: true
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   training_prompt_k: 1
-  generation_mode: batch
+  generation_mode: iterative
   filter_outputs: true
+  reject_context_copies: true
   llm:
     max_new_tokens: 96
     tokens_per_direction: 48

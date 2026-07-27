@@ -49,13 +49,25 @@ def resolve_benchmark(
 
     db = Database(resolve_path(db_path))
     with db.connect() as conn:
-        test_years = infer_benchmark_years(conn, anchor)
+        available = infer_benchmark_years(conn, anchor)
 
-    if not test_years:
+    if not available:
         raise RuntimeError(
             f"No forecast years after year_max={anchor} in the database. "
             "Index more literature or pick another adapter."
         )
+
+    # Respect explicit test_years from config when set (e.g. Job 2: 2023–2025 only).
+    if cfg.test_years:
+        allowed = set(available)
+        test_years = [y for y in cfg.test_years if y in allowed]
+        if not test_years:
+            raise RuntimeError(
+                f"Configured test_years={cfg.test_years} have no overlap with "
+                f"available years after year_max={anchor}: {available}"
+            )
+    else:
+        test_years = available
 
     literature = replace(lit, benchmark_lora_year_max=anchor)
     benchmark_cfg = replace(

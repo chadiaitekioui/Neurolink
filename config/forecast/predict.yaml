@@ -11,8 +11,9 @@ literature:
   max_context_questions: 20
   backend: lora
   use_4bit: true
-  generation_mode: batch
+  generation_mode: iterative
   filter_outputs: true
+  reject_context_copies: true
   llm:
     max_new_tokens: 96
     tokens_per_direction: 48

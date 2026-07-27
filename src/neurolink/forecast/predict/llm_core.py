@@ -255,9 +255,12 @@ def _score_unique(
     *,
     apply_filter: bool,
     audit: GenerationAudit | None = None,
+    blocklist: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     if apply_filter:
-        kept, counts, samples = filter_directions_audited(candidates)
+        kept, counts, samples = filter_directions_audited(
+            candidates, blocklist=blocklist
+        )
         if audit is not None:
             for reason, count in counts.items():
                 audit.rejection_counts[reason] = (
@@ -303,6 +306,7 @@ def generate_directions_batch(
     oversample: int = 2,
     apply_filter: bool = True,
     audit: GenerationAudit | None = None,
+    blocklist: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Batch generation: one (or few) sequences aiming for n numbered directions."""
     import torch
@@ -343,7 +347,12 @@ def generate_directions_batch(
         audit.parsed_candidates = len(candidates)
 
     scored = _score_unique(
-        prompt, candidates, cfg, apply_filter=apply_filter, audit=audit
+        prompt,
+        candidates,
+        cfg,
+        apply_filter=apply_filter,
+        audit=audit,
+        blocklist=blocklist,
     )
     result = scored[:n]
     if audit is not None:
@@ -366,6 +375,7 @@ def generate_directions_iterative(
     apply_filter: bool = True,
     attempts_factor: float = 2.0,
     audit: GenerationAudit | None = None,
+    blocklist: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Generate n directions with k=1 prompts (aligned with training_prompt_k=1).
 
@@ -417,7 +427,7 @@ def generate_directions_iterative(
         for cand in candidates:
             s = strip_list_prefix(cand)
             if apply_filter:
-                reason = classify_direction_rejection(s)
+                reason = classify_direction_rejection(s, blocklist=blocklist)
                 if reason is not None:
                     if audit is not None:
                         audit.record_rejection(reason, s)

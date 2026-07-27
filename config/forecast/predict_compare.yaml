@@ -1,6 +1,6 @@
 db_path: data/neurolink.db
-# test_years inferred at runtime: all question years strictly after the chosen LoRA year_max
-test_years: []
+# Job 2 benchmark years (do not include 2026+ when LoRA is frozen at 2022).
+test_years: [2023, 2024, 2025]
 top_k: [10, 50]
 models:
   - literature_lora
@@ -35,8 +35,9 @@ literature:
   embed_model: sentence-transformers/all-MiniLM-L6-v2
   error_critical_only: true
   training_prompt_k: 1
-  generation_mode: batch
+  generation_mode: iterative
   filter_outputs: true
+  reject_context_copies: true
   max_generation_attempts_factor: 2.0
   llm:
     max_new_tokens: 96

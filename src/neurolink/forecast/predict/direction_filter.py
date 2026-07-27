@@ -83,6 +83,40 @@ def strip_list_prefix(line: str) -> str:
     return line.strip()
 
 
+def normalize_direction_key(text: str) -> str:
+    """Lowercase / collapse whitespace for blocklist matching."""
+    s = strip_list_prefix(text).lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[.,;:!]+$", "", s).strip()
+    return s
+
+
+def build_context_blocklist(texts: list[str]) -> set[str]:
+    """Normalized keys of CONTEXT / few-shot lines that must not be recycled."""
+    return {normalize_direction_key(t) for t in texts if normalize_direction_key(t)}
+
+
+def is_blocklist_copy(text: str, blocklist: set[str] | None) -> bool:
+    """True if text is an exact or truncated copy of a blocked CONTEXT line."""
+    if not blocklist:
+        return False
+    key = normalize_direction_key(text)
+    if not key:
+        return False
+    if key in blocklist:
+        return True
+    # Truncated / extended copies of long CONTEXT spans (BrainGPT v5–v6).
+    if len(key) < 40:
+        return False
+    prefix = key[:80]
+    for blocked in blocklist:
+        if len(blocked) < 40:
+            continue
+        if prefix == blocked[:80] or blocked.startswith(prefix) or key.startswith(blocked[:80]):
+            return True
+    return False
+
+
 def is_prompt_leak(text: str) -> bool:
     """True if the line is instruction / scoring-rubric text rather than a direction."""
     s = strip_list_prefix(text)
@@ -108,6 +142,7 @@ def classify_direction_rejection(
     min_words: int = 8,
     max_words: int = 25,
     min_chars: int = 15,
+    blocklist: set[str] | None = None,
 ) -> str | None:
     """Return a rejection reason code, or None if the direction passes noise + length checks."""
     s = strip_list_prefix(text)
@@ -117,6 +152,8 @@ def classify_direction_rejection(
         return "too_short_chars"
     if s.lower() in _STYLE_FEWSHOT_BLOCKLIST:
         return "fewshot_copy"
+    if is_blocklist_copy(s, blocklist):
+        return "context_copy"
     if _PROMPT_LEAK.search(s):
         return "prompt_leak"
     if _INSTRUCTION_LINE.match(s):
@@ -152,6 +189,7 @@ _NOISE_REASONS = frozenset(
         "empty",
         "too_short_chars",
         "fewshot_copy",
+        "context_copy",
         "prompt_leak",
         "instruction_line",
         "year_prefix",
@@ -172,10 +210,15 @@ def is_valid_direction(
     min_words: int = 8,
     max_words: int = 25,
     min_chars: int = 15,
+    blocklist: set[str] | None = None,
 ) -> bool:
     """Accept a short research-direction span for ranking / storage."""
     return classify_direction_rejection(
-        text, min_words=min_words, max_words=max_words, min_chars=min_chars
+        text,
+        min_words=min_words,
+        max_words=max_words,
+        min_chars=min_chars,
+        blocklist=blocklist,
     ) is None
 
 
@@ -185,9 +228,14 @@ def filter_directions(
     min_words: int = 8,
     max_words: int = 25,
     min_chars: int = 15,
+    blocklist: set[str] | None = None,
 ) -> list[str]:
     kept, _counts, _samples = filter_directions_audited(
-        texts, min_words=min_words, max_words=max_words, min_chars=min_chars
+        texts,
+        min_words=min_words,
+        max_words=max_words,
+        min_chars=min_chars,
+        blocklist=blocklist,
     )
     return kept
 
@@ -198,6 +246,7 @@ def filter_directions_audited(
     min_words: int = 8,
     max_words: int = 25,
     min_chars: int = 15,
+    blocklist: set[str] | None = None,
 ) -> tuple[list[str], dict[str, int], list[tuple[str, str]]]:
     """Filter directions; return kept list, rejection counts, and sample (reason, text)."""
     out: list[str] = []
@@ -207,7 +256,11 @@ def filter_directions_audited(
     for raw in texts:
         s = strip_list_prefix(raw)
         reason = classify_direction_rejection(
-            s, min_words=min_words, max_words=max_words, min_chars=min_chars
+            s,
+            min_words=min_words,
+            max_words=max_words,
+            min_chars=min_chars,
+            blocklist=blocklist,
         )
         if reason is not None:
             counts[reason] = counts.get(reason, 0) + 1

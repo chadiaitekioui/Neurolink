@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ...eval.matching import make_matcher
 from .generation_audit import GenerationAudit
+from .direction_filter import build_context_blocklist
 from .llm_core import (
     CausalLMConfig,
     generate_directions_batch,
@@ -58,8 +59,9 @@ class LiteratureLoraConfig:
     context_year_max: int | None = None  # override context horizon (default: target_year - 1)
     training_prompt_k: int = 1  # k in training prompts (one completion per example)
     # Inference: iterative (k=1 × N, aligned with train) or batch (one shot for N lines).
-    generation_mode: str = "batch"  # batch | iterative
+    generation_mode: str = "iterative"  # iterative | batch
     filter_outputs: bool = True
+    reject_context_copies: bool = True  # drop preds that recycle Prior themes / few-shots
     max_generation_attempts_factor: float = 2.0
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
@@ -1011,7 +1013,12 @@ def predict_literature_lm(
     year_max = N - 1
     context_year = resolve_context_year(N, cfg)
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
-    mode = (cfg.generation_mode or "batch").lower().strip()
+    mode = (cfg.generation_mode or "iterative").lower().strip()
+
+    context_qs = list_context_questions(conn, N, cfg, context_year=context_year)
+    blocklist: set[str] | None = None
+    if cfg.reject_context_copies:
+        blocklist = build_context_blocklist([*context_qs, *_STYLE_EXAMPLES])
 
     audit = GenerationAudit(
         model=model,
@@ -1022,7 +1029,7 @@ def predict_literature_lm(
         adapter=llm_cfg.adapter_path,
         temperature=llm_cfg.temperature,
         context_year=context_year,
-        context_lines=len(list_context_questions(conn, N, cfg, context_year=context_year)),
+        context_lines=len(context_qs),
     )
 
     try:
@@ -1039,6 +1046,7 @@ def predict_literature_lm(
                 oversample=oversample,
                 apply_filter=cfg.filter_outputs,
                 audit=audit,
+                blocklist=blocklist,
             )
 
         def _builder(n_req: int, already: list[str]) -> str:
@@ -1062,6 +1070,7 @@ def predict_literature_lm(
             apply_filter=cfg.filter_outputs,
             attempts_factor=cfg.max_generation_attempts_factor,
             audit=audit,
+            blocklist=blocklist,
         )
     except ImportError as e:
         audit.error = str(e)

@@ -32,8 +32,9 @@ literature:
   error_critical_only: true
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   training_prompt_k: 1
-  generation_mode: batch
+  generation_mode: iterative
   filter_outputs: true
+  reject_context_copies: true
   max_generation_attempts_factor: 2.0
   llm:
     max_new_tokens: 96
