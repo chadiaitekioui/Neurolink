@@ -7,7 +7,14 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .direction_filter import filter_directions, is_valid_direction, strip_list_prefix
+from .direction_filter import (
+    classify_direction_rejection,
+    filter_directions,
+    filter_directions_audited,
+    is_valid_direction,
+    strip_list_prefix,
+)
+from .generation_audit import GenerationAudit, truncate_preview
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +171,23 @@ def sequence_perplexity(text: str, cfg: CausalLMConfig, *, max_length: int = 204
     return math.exp(float(out.loss.item()))
 
 
+def _prompt_token_stats(prompt: str, tokenizer, max_length: int) -> tuple[int, int, bool]:
+    """Return (full_tokens, used_tokens, was_truncated)."""
+    full_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+    trunc_side = getattr(tokenizer, "truncation_side", "right")
+    tokenizer.truncation_side = "left"
+    try:
+        used_ids = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=max_length,
+            add_special_tokens=True,
+        )["input_ids"]
+    finally:
+        tokenizer.truncation_side = trunc_side
+    return len(full_ids), len(used_ids), len(full_ids) > len(used_ids)
+
+
 def _generate_raw(
     prompt: str,
     cfg: CausalLMConfig,
@@ -171,10 +195,20 @@ def _generate_raw(
     max_new_tokens: int,
     n_seq: int,
     do_sample: bool,
+    audit: GenerationAudit | None = None,
 ) -> list[str]:
     import torch
 
     model, tokenizer = _load_model(cfg)
+    max_len = max(512, int(cfg.prompt_max_length))
+    if audit is not None:
+        full_tok, used_tok, truncated = _prompt_token_stats(prompt, tokenizer, max_len)
+        audit.prompt_tokens_full = full_tok
+        audit.prompt_tokens_used = used_tok
+        audit.prompt_truncated = truncated
+        audit.max_new_tokens = max_new_tokens
+        audit.num_return_sequences = n_seq
+        audit.do_sample = do_sample
     # Keep the end of the prompt (instructions + open "1.") if truncating.
     trunc_side = getattr(tokenizer, "truncation_side", "right")
     tokenizer.truncation_side = "left"
@@ -183,7 +217,7 @@ def _generate_raw(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=max(512, int(cfg.prompt_max_length)),
+            max_length=max_len,
         )
     finally:
         tokenizer.truncation_side = trunc_side
@@ -207,6 +241,10 @@ def _generate_raw(
     prompt_len = inputs["input_ids"].shape[1]
     for seq in outputs:
         decoded.append(tokenizer.decode(seq[prompt_len:], skip_special_tokens=True))
+    if audit is not None:
+        audit.set_raw_outputs(decoded)
+        combined = "\n---\n".join(decoded)
+        audit._raw_preview = truncate_preview(combined)  # noqa: SLF001
     return decoded
 
 
@@ -216,9 +254,21 @@ def _score_unique(
     cfg: CausalLMConfig,
     *,
     apply_filter: bool,
+    audit: GenerationAudit | None = None,
 ) -> list[tuple[str, float]]:
     if apply_filter:
-        candidates = filter_directions(candidates)
+        kept, counts, samples = filter_directions_audited(candidates)
+        if audit is not None:
+            for reason, count in counts.items():
+                audit.rejection_counts[reason] = (
+                    audit.rejection_counts.get(reason, 0) + count
+                )
+            for reason, text in samples:
+                if len(audit.rejected_samples) < 5:
+                    audit.rejected_samples.append(
+                        {"reason": reason, "text": truncate_preview(text, 200)}
+                    )
+        candidates = kept
     else:
         cleaned: list[str] = []
         seen: set[str] = set()
@@ -230,6 +280,9 @@ def _score_unique(
             seen.add(key)
             cleaned.append(s)
         candidates = cleaned
+
+    if audit is not None:
+        audit.after_filter = len(candidates)
 
     scored: list[tuple[str, float]] = []
     for q in candidates:
@@ -249,6 +302,7 @@ def generate_directions_batch(
     *,
     oversample: int = 2,
     apply_filter: bool = True,
+    audit: GenerationAudit | None = None,
 ) -> list[tuple[str, float]]:
     """Batch generation: one (or few) sequences aiming for n numbered directions."""
     import torch
@@ -269,7 +323,12 @@ def generate_directions_batch(
     max_new = min(2048, max(cfg.max_new_tokens, per * max(n, 1)))
 
     raw_outputs = _generate_raw(
-        prompt, cfg, max_new_tokens=max_new, n_seq=n_seq, do_sample=do_sample
+        prompt,
+        cfg,
+        max_new_tokens=max_new,
+        n_seq=n_seq,
+        do_sample=do_sample,
+        audit=audit,
     )
     candidates: list[str] = []
     for decoded in raw_outputs:
@@ -277,9 +336,22 @@ def generate_directions_batch(
 
     if not candidates and raw_outputs:
         candidates = parse_generated_directions(raw_outputs[0])
+        if audit is not None:
+            audit.parse_fallback_blob = True
 
-    scored = _score_unique(prompt, candidates, cfg, apply_filter=apply_filter)
-    return scored[:n]
+    if audit is not None:
+        audit.parsed_candidates = len(candidates)
+
+    scored = _score_unique(
+        prompt, candidates, cfg, apply_filter=apply_filter, audit=audit
+    )
+    result = scored[:n]
+    if audit is not None:
+        audit.returned = len(result)
+        for text, _score in result:
+            audit.record_kept(text)
+        audit.log()
+    return result
 
 
 # Backward-compatible alias
@@ -293,6 +365,7 @@ def generate_directions_iterative(
     *,
     apply_filter: bool = True,
     attempts_factor: float = 2.0,
+    audit: GenerationAudit | None = None,
 ) -> list[tuple[str, float]]:
     """Generate n directions with k=1 prompts (aligned with training_prompt_k=1).
 
@@ -303,12 +376,17 @@ def generate_directions_iterative(
     collected: list[tuple[str, float]] = []
     already: list[str] = []
     max_attempts = max(n, int(n * max(attempts_factor, 1.0)))
+    if audit is not None:
+        audit.attempts_budget = max_attempts
     per_tokens = max(24, int(cfg.tokens_per_direction))
     greedy = cfg.temperature <= 0.0
+    raw_chunks: list[str] = []
 
     for attempt in range(max_attempts):
         if len(collected) >= n:
             break
+        if audit is not None:
+            audit.attempts_used = attempt + 1
         prompt = prompt_builder(1, already)
         if greedy:
             torch.manual_seed(cfg.seed + attempt)
@@ -321,20 +399,39 @@ def generate_directions_iterative(
             do_sample = True
 
         raw_outputs = _generate_raw(
-            prompt, cfg, max_new_tokens=per_tokens, n_seq=n_seq, do_sample=do_sample
+            prompt,
+            cfg,
+            max_new_tokens=per_tokens,
+            n_seq=n_seq,
+            do_sample=do_sample,
+            audit=audit if attempt == 0 else None,
         )
+        raw_chunks.extend(raw_outputs)
         candidates: list[str] = []
         for decoded in raw_outputs:
             candidates.extend(parse_generated_directions(decoded, min_len=12))
 
+        if audit is not None:
+            audit.parsed_candidates += len(candidates)
+
         for cand in candidates:
             s = strip_list_prefix(cand)
-            if apply_filter and not is_valid_direction(s):
+            if apply_filter:
+                reason = classify_direction_rejection(s)
+                if reason is not None:
+                    if audit is not None:
+                        audit.record_rejection(reason, s)
+                    continue
+            elif not s:
+                if audit is not None:
+                    audit.record_rejection("empty", cand)
                 continue
             if not s:
                 continue
             key = s.lower()
             if key in {a.lower() for a in already}:
+                if audit is not None:
+                    audit.record_rejection("duplicate", s)
                 continue
             try:
                 score = score_completion(prompt, s, cfg)
@@ -358,11 +455,20 @@ def generate_directions_iterative(
         best.append((text, score))
         if len(best) >= n:
             break
+    if audit is not None:
+        audit.set_raw_outputs(raw_chunks)
+        audit._raw_preview = truncate_preview("\n---\n".join(raw_chunks))  # noqa: SLF001
+        audit.after_filter = len(collected)
+        audit.returned = len(best)
+        for text, _score in best:
+            audit.record_kept(text)
+        audit.log()
     logger.info(
-        "Iterative generation: %d/%d valid directions (attempts=%d, filter=%s)",
+        "Iterative generation: %d/%d valid directions (attempts=%d used=%d, filter=%s)",
         len(best),
         n,
         max_attempts,
+        audit.attempts_used if audit else max_attempts,
         apply_filter,
     )
     return best

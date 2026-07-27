@@ -99,24 +99,71 @@ def is_prompt_leak(text: str) -> bool:
 
 def is_noise_direction(text: str) -> bool:
     """True if the line looks like metadata / corpus junk / prompt leakage."""
-    s = (text or "").strip()
+    return classify_direction_rejection(text) in _NOISE_REASONS
+
+
+def classify_direction_rejection(
+    text: str,
+    *,
+    min_words: int = 8,
+    max_words: int = 25,
+    min_chars: int = 15,
+) -> str | None:
+    """Return a rejection reason code, or None if the direction passes noise + length checks."""
+    s = strip_list_prefix(text)
     if not s:
-        return True
-    if is_prompt_leak(s):
-        return True
+        return "empty"
+    if len(s) < min_chars:
+        return "too_short_chars"
+    if s.lower() in _STYLE_FEWSHOT_BLOCKLIST:
+        return "fewshot_copy"
+    if _PROMPT_LEAK.search(s):
+        return "prompt_leak"
+    if _INSTRUCTION_LINE.match(s):
+        return "instruction_line"
     if _YEAR_PREFIX.match(s):
-        return True
+        return "year_prefix"
     if _DOI.search(s) or _PMID.search(s):
-        return True
-    if _COMMENT.search(s) or _AUTHOR_HEAVY.search(s):
-        return True
-    if _DEGENERATE.search(s) or _NUMBER_ONLY.match(s):
-        return True
+        return "doi_pmid"
+    if _COMMENT.search(s):
+        return "comment_in"
+    if _AUTHOR_HEAVY.search(s):
+        return "author_heavy"
+    if _DEGENERATE.search(s):
+        return "degenerate"
+    if _NUMBER_ONLY.match(s):
+        return "number_only"
     if is_junk_sentence(s):
-        return True
+        return "junk_sentence"
     if _HERE_WE.search(s) and len(s.split()) > 30:
-        return True
-    return False
+        return "narrative_here_we"
+    n_words = len(s.split())
+    if n_words < min_words:
+        return "too_few_words"
+    if n_words > max_words:
+        return "too_many_words"
+    if s.endswith("?"):
+        return "question_mark"
+    return None
+
+
+_NOISE_REASONS = frozenset(
+    {
+        "empty",
+        "too_short_chars",
+        "fewshot_copy",
+        "prompt_leak",
+        "instruction_line",
+        "year_prefix",
+        "doi_pmid",
+        "comment_in",
+        "author_heavy",
+        "degenerate",
+        "number_only",
+        "junk_sentence",
+        "narrative_here_we",
+    }
+)
 
 
 def is_valid_direction(
@@ -127,18 +174,9 @@ def is_valid_direction(
     min_chars: int = 15,
 ) -> bool:
     """Accept a short research-direction span for ranking / storage."""
-    s = strip_list_prefix(text)
-    if len(s) < min_chars:
-        return False
-    if is_noise_direction(s):
-        return False
-    n_words = len(s.split())
-    if n_words < min_words or n_words > max_words:
-        return False
-    # Reject pure interrogatives kept as questions.
-    if s.endswith("?"):
-        return False
-    return True
+    return classify_direction_rejection(
+        text, min_words=min_words, max_words=max_words, min_chars=min_chars
+    ) is None
 
 
 def filter_directions(
@@ -148,18 +186,43 @@ def filter_directions(
     max_words: int = 25,
     min_chars: int = 15,
 ) -> list[str]:
+    kept, _counts, _samples = filter_directions_audited(
+        texts, min_words=min_words, max_words=max_words, min_chars=min_chars
+    )
+    return kept
+
+
+def filter_directions_audited(
+    texts: list[str],
+    *,
+    min_words: int = 8,
+    max_words: int = 25,
+    min_chars: int = 15,
+) -> tuple[list[str], dict[str, int], list[tuple[str, str]]]:
+    """Filter directions; return kept list, rejection counts, and sample (reason, text)."""
     out: list[str] = []
     seen: set[str] = set()
+    counts: dict[str, int] = {}
+    samples: list[tuple[str, str]] = []
     for raw in texts:
         s = strip_list_prefix(raw)
-        if not is_valid_direction(s, min_words=min_words, max_words=max_words, min_chars=min_chars):
+        reason = classify_direction_rejection(
+            s, min_words=min_words, max_words=max_words, min_chars=min_chars
+        )
+        if reason is not None:
+            counts[reason] = counts.get(reason, 0) + 1
+            if len(samples) < 5:
+                samples.append((reason, s))
             continue
         key = s.lower()
         if key in seen:
+            counts["duplicate"] = counts.get("duplicate", 0) + 1
+            if len(samples) < 5:
+                samples.append(("duplicate", s))
             continue
         seen.add(key)
         out.append(s)
-    return out
+    return out, counts, samples
 
 
 def format_compliance(preds: list[str]) -> FormatCompliance:

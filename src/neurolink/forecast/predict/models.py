@@ -104,8 +104,10 @@ def run_predict(config_path: str | PredictConfig, run_id: str | None = None) -> 
             if model not in predictors:
                 logger.warning("Unknown model: %s", model)
                 continue
+            model_total = 0
             for N in test_years:
                 preds = predictors[model](conn, N, max_k, rng)
+                model_total += len(preds)
                 conn.execute(
                     "DELETE FROM predictions WHERE target_year=? AND model=? AND run_id=?",
                     (N, model, run_id),
@@ -121,6 +123,13 @@ def run_predict(config_path: str | PredictConfig, run_id: str | None = None) -> 
                     )
                     n += 1
             if model in LLM_LITERATURE_MODELS:
+                logger.info(
+                    "Predict model=%s: %d rows across years %s (max_k=%d) — see GEN_AUDIT lines",
+                    model,
+                    model_total,
+                    test_years,
+                    max_k,
+                )
                 release_gpu_memory()
 
     db.record_run(run_id, "predict", notes=f"{n} predictions")

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...eval.matching import make_matcher
+from .generation_audit import GenerationAudit
 from .llm_core import (
     CausalLMConfig,
     generate_directions_batch,
@@ -1012,11 +1013,24 @@ def predict_literature_lm(
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
     mode = (cfg.generation_mode or "batch").lower().strip()
 
+    audit = GenerationAudit(
+        model=model,
+        target_year=N,
+        requested_k=k,
+        generation_mode=mode,
+        filter_outputs=cfg.filter_outputs,
+        adapter=llm_cfg.adapter_path,
+        temperature=llm_cfg.temperature,
+        context_year=context_year,
+        context_lines=len(list_context_questions(conn, N, cfg, context_year=context_year)),
+    )
+
     try:
         if mode == "batch":
             prompt = build_generation_prompt(
                 conn, N, cfg, k=k, context_year=context_year
             )
+            audit.prompt_chars = len(prompt)
             oversample = 1 if cfg.llm.temperature <= 0.0 else 3
             return generate_directions_batch(
                 prompt,
@@ -1024,6 +1038,7 @@ def predict_literature_lm(
                 k,
                 oversample=oversample,
                 apply_filter=cfg.filter_outputs,
+                audit=audit,
             )
 
         def _builder(n_req: int, already: list[str]) -> str:
@@ -1036,16 +1051,27 @@ def predict_literature_lm(
                 already=already,
             )
 
+        # Prime prompt stats from first builder call.
+        first_prompt = _builder(1, [])
+        audit.prompt_chars = len(first_prompt)
+
         return generate_directions_iterative(
             _builder,
             llm_cfg,
             k,
             apply_filter=cfg.filter_outputs,
             attempts_factor=cfg.max_generation_attempts_factor,
+            audit=audit,
         )
     except ImportError as e:
+        audit.error = str(e)
+        audit.log()
         logger.error("%s: %s — pip install -e '.[train]'", model, e)
         return []
+    except Exception as e:
+        audit.error = f"{type(e).__name__}: {e}"
+        audit.log()
+        raise
 
 
 def make_literature_predictor(cfg: LiteratureLoraConfig, model: str = "literature_lora"):
