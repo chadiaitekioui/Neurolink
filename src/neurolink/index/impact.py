@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 import requests
@@ -177,9 +177,11 @@ def _resolve_subject_text(
         return segment_question.strip(), float(qc_score or 0.0)
 
     source = (abstract or segment_question or "").strip()
+    # Impact runs on CPU after segment; never reload the index LLM here.
+    reextract_cfg = cfg if cfg.extraction_mode == "rules" else replace(cfg, extraction_mode="rules")
     extracted = extract_subject(
         source,
-        cfg=cfg,
+        cfg=reextract_cfg,
         title=title,
         classifier=classifier,
     )

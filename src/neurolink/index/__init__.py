@@ -21,11 +21,13 @@ from .pipeline import (
 from .segment import SegmentConfig, run_segment
 from .subject import (
     SubjectConfig,
+    SubjectLlmConfig,
     SubjectResult,
     compress_to_subject_span,
     extract_subject,
     heuristic_subjectness,
 )
+from .subject_llm import build_extraction_prompt, parse_llm_direction, validate_llm_direction
 from ..utils.pubmed_clean import clean_abstract, structure_abstract, structure_abstract_sections
 from ..utils.pubmed_parse import ParsedArticle, parse_pubmed_text
 
@@ -38,12 +40,14 @@ __all__ = [
     "ParsedArticle",
     "SegmentConfig",
     "SubjectConfig",
+    "SubjectLlmConfig",
     "SubjectResult",
     "build_search_term",
     "check_index_ready",
     "clean_abstract",
     "collect_pubmed",
     "compress_to_subject_span",
+    "build_extraction_prompt",
     "esearch_pmids",
     "extract_subject",
     "citation_rate",

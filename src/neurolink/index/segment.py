@@ -21,6 +21,7 @@ from ..utils.pubmed_clean import (
 from ..utils.config import load_config, make_run_id, resolve_path
 from ..utils.torch_device import resolve_torch_device
 from .subject import SubjectClassifier, SubjectConfig, extract_subject, get_subject_classifier
+from .subject_llm import results_from_sections
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,31 @@ def _bucket_parts(
     )
 
 
+def segment_abstract_llm(
+    text: str,
+    *,
+    title: str | None = None,
+    subject_cfg: SubjectConfig | None = None,
+    classifier: SubjectClassifier | None = None,
+) -> tuple[str, str, float | None]:
+    """LLM subject extraction + rule-based results bucket (no PubMedBERT)."""
+    cfg = subject_cfg or SubjectConfig()
+    results = results_from_sections(text)
+
+    if not cfg.enabled:
+        return "", results, None
+
+    extracted = extract_subject(
+        text,
+        cfg=cfg,
+        title=title,
+        classifier=classifier,
+    )
+    if extracted is None:
+        return "", results, 0.0
+    return extracted.text, results, extracted.subjectness
+
+
 def segment_abstract(
     text: str,
     tokenizer,
@@ -204,14 +230,23 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
         logger.info("Segmentation: %d articles", len(articles))
 
     device = resolve_torch_device(cfg.device)
+    use_llm = cfg.subject.extraction_mode in ("llm", "hybrid")
 
-    try:
-        tokenizer, model, id2label = _load_pubmedbert(cfg.pubmedbert_model, device)
-        logger.info("PubMedBERT loaded: %s (device=%s)", cfg.pubmedbert_model, device)
-    except ImportError as e:
-        raise ImportError(
-            "segment requires transformers and torch — pip install -e ."
-        ) from e
+    tokenizer = model = id2label = None
+    if not use_llm:
+        try:
+            tokenizer, model, id2label = _load_pubmedbert(cfg.pubmedbert_model, device)
+            logger.info("PubMedBERT loaded: %s (device=%s)", cfg.pubmedbert_model, device)
+        except ImportError as e:
+            raise ImportError(
+                "segment requires transformers and torch — pip install -e ."
+            ) from e
+    else:
+        logger.info(
+            "Segmentation mode=%s — skipping PubMedBERT; LLM=%s",
+            cfg.subject.extraction_mode,
+            cfg.subject.llm.base_model,
+        )
 
     classifier = None
     if cfg.subject.enabled and cfg.subject.use_level2_classifier:
@@ -222,17 +257,26 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
     with db.connect() as conn:
         for row in articles:
             text = (row["text_work"] or row["abstract"] or "").strip()
-            subject, results, qc = segment_abstract(
-                text,
-                tokenizer,
-                model,
-                id2label,
-                device,
-                title=row["title"],
-                subject_cfg=cfg.subject,
-                classifier=classifier,
-            )
-            method = "hybrid+subject" if cfg.subject.enabled else "hybrid"
+            if use_llm:
+                subject, results, qc = segment_abstract_llm(
+                    text,
+                    title=row["title"],
+                    subject_cfg=cfg.subject,
+                    classifier=classifier,
+                )
+                method = "llm+subject"
+            else:
+                subject, results, qc = segment_abstract(
+                    text,
+                    tokenizer,
+                    model,
+                    id2label,
+                    device,
+                    title=row["title"],
+                    subject_cfg=cfg.subject,
+                    classifier=classifier,
+                )
+                method = "hybrid+subject" if cfg.subject.enabled else "hybrid"
             if qc is not None and qc > 0:
                 n_subjects += 1
             conn.execute(
@@ -256,6 +300,15 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
                     total_articles,
                     100.0 * done / max(1, total_articles),
                 )
+
+    if use_llm:
+        try:
+            from ..forecast.predict.llm_core import release_gpu_memory
+
+            release_gpu_memory()
+            logger.info("Released LLM VRAM after segment stage")
+        except ImportError:
+            pass
 
     db.record_run(
         run_id,

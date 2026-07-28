@@ -1,7 +1,17 @@
 db_path: data/neurolink.db
-# Subject extraction (research directions: rules + prototype classifier)
+device: auto
+# Subject extraction: llm replaces PubMedBERT segmentation + span rules.
 subject:
   enabled: true
+  extraction_mode: llm  # rules | llm | hybrid (llm then rules fallback)
+  llm:
+    base_model: mistralai/Mistral-7B-v0.1
+    use_4bit: true
+    max_new_tokens: 64
+    temperature: 0.0
+    prompt_max_length: 4096
+    abstract_max_chars: 3500
+    llm_subjectness_floor: 0.55
   min_words: 8
   max_words: 25
   absolute_min_words: 5

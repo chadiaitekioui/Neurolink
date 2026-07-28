@@ -81,11 +81,30 @@ _PROTOTYPES: dict[SubjectLabel, list[str]] = {
 }
 
 
+ExtractionMode = Literal["rules", "llm", "hybrid"]
+
+
+@dataclass
+class SubjectLlmConfig:
+    """Causal LM settings for index-time direction extraction (Mistral base, no LoRA)."""
+
+    base_model: str = "mistralai/Mistral-7B-v0.1"
+    use_4bit: bool = True
+    max_new_tokens: int = 64
+    temperature: float = 0.0
+    prompt_max_length: int = 4096
+    abstract_max_chars: int = 3500
+    llm_subjectness_floor: float = 0.55
+
+
 @dataclass
 class SubjectConfig:
     """Subject extraction / filtering for index stages."""
 
     enabled: bool = True
+    # rules = L1+L2 span pick; llm = Mistral base extraction; hybrid = llm then rules fallback.
+    extraction_mode: ExtractionMode = "rules"
+    llm: SubjectLlmConfig = field(default_factory=SubjectLlmConfig)
     min_words: int = 8
     max_words: int = 25
     absolute_min_words: int = 5
@@ -270,18 +289,13 @@ def _candidate_sentences_from_sections(
     return [(sent, section) for _, _, sent, section in scored]
 
 
-def extract_subject(
+def _extract_subject_rules(
     text: str,
     *,
-    cfg: SubjectConfig | None = None,
+    cfg: SubjectConfig,
     title: str | None = None,
     classifier: SubjectClassifier | None = None,
 ) -> SubjectResult | None:
-    """Extract one research-direction subject from an abstract or question-bucket text."""
-    cfg = cfg or SubjectConfig()
-    if not cfg.enabled or not (text or "").strip():
-        return None
-
     sections = structure_abstract_sections(text)
     if len(sections) == 1 and sections[0][1] is None and sections[0][2] is None:
         # Unstructured blob (already a question bucket): treat whole as one section.
@@ -352,6 +366,44 @@ def extract_subject(
                     source_section="TITLE",
                 )
     return best
+
+
+def extract_subject(
+    text: str,
+    *,
+    cfg: SubjectConfig | None = None,
+    title: str | None = None,
+    classifier: SubjectClassifier | None = None,
+) -> SubjectResult | None:
+    """Extract one research-direction subject from an abstract or question-bucket text."""
+    cfg = cfg or SubjectConfig()
+    if not cfg.enabled:
+        return None
+    if not (text or "").strip() and not (title or "").strip():
+        return None
+
+    if cfg.extraction_mode in ("llm", "hybrid"):
+        from .subject_llm import extract_subject_llm
+
+        llm_result = extract_subject_llm(
+            title,
+            text,
+            cfg=cfg,
+            classifier=classifier,
+        )
+        if llm_result is not None:
+            return llm_result
+        if cfg.extraction_mode == "llm":
+            return None
+
+    if not (text or "").strip():
+        return None
+    return _extract_subject_rules(
+        text,
+        cfg=cfg,
+        title=title,
+        classifier=classifier,
+    )
 
 
 def year_in_range(year: int | None, cfg: SubjectConfig) -> bool:
