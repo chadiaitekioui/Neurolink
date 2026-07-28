@@ -159,22 +159,30 @@ def _resolve_subject_text(
     qc_score: float | None,
     cfg: SubjectConfig,
     classifier,
+    segmentation_method: str | None = None,
 ) -> tuple[str | None, float]:
     """Return (subject_text, subjectness) or (None, 0) if rejected."""
     if not cfg.enabled:
         text = (segment_question or "").strip()
         return (text or None, 1.0 if text else 0.0)
 
+    seg_q = (segment_question or "").strip()
+    method = (segmentation_method or "").lower()
+    qc = float(qc_score or 0.0)
+    # Keep failed LLM drafts in article_segments; do not rules-reextract or propagate.
+    if "llm" in method and qc < cfg.min_subjectness and seg_q:
+        return None, qc
+
     # Re-extract when qc missing/low or segment still looks like a long abstract blob.
-    words = len((segment_question or "").split())
+    words = len(seg_q.split())
     needs_extract = (
         qc_score is None
-        or float(qc_score) < cfg.min_subjectness
+        or qc < cfg.min_subjectness
         or words > cfg.max_words + 5
         or words < cfg.absolute_min_words
     )
-    if not needs_extract and segment_question.strip():
-        return segment_question.strip(), float(qc_score or 0.0)
+    if not needs_extract and seg_q:
+        return seg_q, qc
 
     source = (abstract or segment_question or "").strip()
     # Impact runs on CPU after segment; never reload the index LLM here.
@@ -268,6 +276,7 @@ def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
                 qc_score=seg["qc_score"],
                 cfg=subject_cfg,
                 classifier=classifier,
+                segmentation_method=seg["segmentation_method"],
             )
             if not subject_text:
                 n_dropped_subject += 1

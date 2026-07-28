@@ -124,6 +124,7 @@ class SubjectResult:
     subjectness: float
     label: SubjectLabel
     source_section: str | None = None
+    reject_reason: str | None = None
 
 
 @dataclass
@@ -391,10 +392,10 @@ def extract_subject(
             cfg=cfg,
             classifier=classifier,
         )
-        if llm_result is not None:
+        if llm_result is not None and not llm_result.reject_reason:
             return llm_result
         if cfg.extraction_mode == "llm":
-            return None
+            return llm_result
 
     if not (text or "").strip():
         return None

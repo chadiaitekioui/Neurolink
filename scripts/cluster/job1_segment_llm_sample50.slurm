@@ -36,7 +36,7 @@ PMIDS_FILE="${NEUROLINK_PMIDS_FILE:-}"
 LIMIT="${NEUROLINK_SEGMENT_LIMIT:-50}"
 
 echo "=== LLM subject sample test ==="
-neurolink status --db data/neurolink_sample50.db
+neurolink --db data/neurolink_sample50.db status
 
 SEG_ARGS=(segment --config "$CONFIG" --device cuda)
 if [[ -n "$PMIDS_FILE" ]]; then
@@ -51,5 +51,5 @@ neurolink "${SEG_ARGS[@]}"
 echo "--- impact + embed (sample DB only) ---"
 neurolink impact --config config/index/impact_sample50.yaml
 neurolink embed --config config/index/embed_sample50.yaml
-neurolink status --db data/neurolink_sample50.db
+neurolink --db data/neurolink_sample50.db status
 echo "=== Sample test done ==="

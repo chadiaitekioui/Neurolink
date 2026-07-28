@@ -219,7 +219,8 @@ def segment_abstract_llm(
     )
     if extracted is None:
         return "", results, 0.0
-    return extracted.text, results, extracted.subjectness
+    qc = 0.0 if extracted.reject_reason else extracted.subjectness
+    return extracted.text, results, qc
 
 
 def segment_abstract(

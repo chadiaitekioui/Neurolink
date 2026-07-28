@@ -71,25 +71,39 @@ def validate_llm_direction(
     max_words: int = 25,
 ) -> str | None:
     """Return cleaned span or None if rejected by shared direction filters."""
+    span, reason = diagnose_llm_direction(text, min_words=min_words, max_words=max_words)
+    if reason is not None:
+        logger.debug("LLM direction rejected (%s): %s", reason, (span or text)[:80])
+        return None
+    return span
+
+
+def diagnose_llm_direction(
+    text: str,
+    *,
+    min_words: int = 8,
+    max_words: int = 25,
+) -> tuple[str | None, str | None]:
+    """Return (best-effort text, reject_reason). Text is kept even when rejected."""
+    if not text or not text.strip():
+        return None, "empty"
     span = compress_to_subject_span(
         text,
         min_words=min_words,
         max_words=max_words,
         absolute_min_words=min_words,
     )
-    if span is None:
-        span = strip_list_prefix(text)
-    if not span:
-        return None
+    candidate = span or strip_list_prefix(text)
+    if not candidate:
+        return None, "empty"
     reason = classify_direction_rejection(
-        span,
+        candidate,
         min_words=min_words,
         max_words=max_words,
     )
     if reason is not None:
-        logger.debug("LLM direction rejected (%s): %s", reason, span[:80])
-        return None
-    return span
+        return candidate, reason
+    return span or candidate, None
 
 
 def _llm_cfg_to_causal(llm: SubjectLlmConfig) -> CausalLMConfig:
@@ -137,16 +151,27 @@ def extract_subject_llm(
     raw = decoded[0] if decoded else ""
     parsed = parse_llm_direction(raw)
     if not parsed:
-        logger.debug("LLM subject extraction: empty parse from %r", raw[:120])
+        logger.info("LLM subject rejected (empty_parse): raw=%r", raw[:160])
         return None
 
-    span = validate_llm_direction(
+    span, fmt_reason = diagnose_llm_direction(
         parsed,
         min_words=cfg.min_words,
         max_words=cfg.max_words,
     )
-    if span is None:
+    if not span:
+        logger.info("LLM subject rejected (empty_parse): parsed=%r", parsed[:160])
         return None
+
+    if fmt_reason is not None:
+        logger.info("LLM subject rejected (%s): %s", fmt_reason, span)
+        return SubjectResult(
+            text=span,
+            subjectness=0.0,
+            label="subject",
+            source_section="LLM",
+            reject_reason=fmt_reason,
+        )
 
     score = max(heuristic_subjectness(span), llm.llm_subjectness_floor)
     label = "subject"
@@ -162,9 +187,25 @@ def extract_subject_llm(
         else:
             score = min(1.0, score + 0.15 * conf)
     if score < cfg.min_subjectness:
-        return None
+        reason = f"low_subjectness:{label}"
+        logger.info("LLM subject rejected (%s, score=%.2f): %s", reason, score, span)
+        return SubjectResult(
+            text=span,
+            subjectness=score,
+            label=label,
+            source_section="LLM",
+            reject_reason=reason,
+        )
     if label != "subject" and score < cfg.min_subjectness + 0.15:
-        return None
+        reason = f"low_subjectness:{label}"
+        logger.info("LLM subject rejected (%s, score=%.2f): %s", reason, score, span)
+        return SubjectResult(
+            text=span,
+            subjectness=score,
+            label=label,
+            source_section="LLM",
+            reject_reason=reason,
+        )
 
     return SubjectResult(
         text=span,
