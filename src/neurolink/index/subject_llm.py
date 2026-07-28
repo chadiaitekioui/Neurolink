@@ -1,7 +1,7 @@
 """Level-3 research-direction extraction via causal LM (indexing only).
 
-Uses ``mistralai/Mistral-7B-v0.1`` **base** (no LoRA) — same infra as forecast but
-orthogonal to the literature LoRA adapter used at predict time.
+Uses ``mistralai/Mistral-7B-Instruct-v0.2`` (no LoRA) — orthogonal to the literature
+LoRA adapter used at predict time.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import logging
 import re
 
 from ..forecast.predict.direction_filter import classify_direction_rejection, strip_list_prefix
-from ..forecast.predict.llm_core import CausalLMConfig, _generate_raw
+from ..forecast.predict.llm_core import CausalLMConfig, _generate_raw, _load_model
 from ..utils.pubmed_clean import polish_segment_field, structure_abstract_sections
 from .subject import (
     SubjectClassifier,
@@ -24,20 +24,15 @@ from .subject import (
 
 logger = logging.getLogger(__name__)
 
-
-_EXTRACTION_PROMPT = """Extract the main neuroscience research direction from this paper.
+_USER_PROMPT = """Summarize this neuroscience paper as ONE research direction (8-25 words, noun phrase, no question mark).
 
 Title: {title}
 
 Abstract:
-{abstract}
-
-Write exactly ONE research direction (8-25 words, noun phrase).
-Rules: no question mark; no "We aimed" or methods-only text; grounded in title/abstract only.
-Direction:"""
+{abstract}"""
 
 
-def build_extraction_prompt(
+def build_extraction_user_content(
     title: str,
     abstract: str,
     *,
@@ -47,7 +42,49 @@ def build_extraction_prompt(
     body = polish_segment_field(abstract or "")
     if len(body) > abstract_max_chars:
         body = body[: abstract_max_chars - 3].rstrip() + "..."
-    return _EXTRACTION_PROMPT.format(title=title, abstract=body)
+    return _USER_PROMPT.format(title=title, abstract=body)
+
+
+def build_extraction_prompt(
+    title: str,
+    abstract: str,
+    *,
+    abstract_max_chars: int = 3500,
+) -> str:
+    """Plain user message (no chat template). Kept for tests and debugging."""
+    return build_extraction_user_content(
+        title, abstract, abstract_max_chars=abstract_max_chars
+    )
+
+
+def format_extraction_prompt(
+    title: str,
+    abstract: str,
+    *,
+    llm: SubjectLlmConfig,
+) -> str:
+    """Build the full model input (chat template when enabled)."""
+    user = build_extraction_user_content(
+        title,
+        abstract,
+        abstract_max_chars=llm.abstract_max_chars,
+    )
+    if not llm.use_chat_template:
+        return user + "\n\nDirection:"
+
+    causal = _llm_cfg_to_causal(llm)
+    _, tokenizer = _load_model(causal)
+    apply = getattr(tokenizer, "apply_chat_template", None)
+    if apply is None:
+        logger.warning("Tokenizer has no chat template — using plain prompt")
+        return user + "\n\nDirection:"
+
+    messages = [{"role": "user", "content": user}]
+    try:
+        return apply(messages, tokenize=False, add_generation_prompt=True)
+    except Exception as exc:
+        logger.warning("apply_chat_template failed (%s) — using plain prompt", exc)
+        return user + "\n\nDirection:"
 
 
 def parse_llm_direction(raw: str) -> str | None:
@@ -58,8 +95,13 @@ def parse_llm_direction(raw: str) -> str | None:
         cleaned = strip_list_prefix(line)
         cleaned = re.sub(r"^(?:direction|research direction)\s*:\s*", "", cleaned, flags=re.I)
         cleaned = cleaned.strip(" \"'")
-        if cleaned and not cleaned.lower().startswith(("rules:", "note:")):
-            return cleaned
+        if not cleaned or cleaned.lower().startswith(("rules:", "note:")):
+            continue
+        if re.match(r"^what is the main research direction", cleaned, re.I):
+            continue
+        if re.fullmatch(r"[-\s]+", cleaned):
+            continue
+        return cleaned
     blob = strip_list_prefix(raw.replace("\n", " "))
     return blob.strip() or None
 
@@ -125,16 +167,12 @@ def extract_subject_llm(
     cfg: SubjectConfig,
     classifier: SubjectClassifier | None = None,
 ) -> SubjectResult | None:
-    """Extract one research direction with Mistral base (no adapter)."""
+    """Extract one research direction with an instruct LM (no adapter)."""
     llm = cfg.llm
     if not (abstract or "").strip() and not (title or "").strip():
         return None
 
-    prompt = build_extraction_prompt(
-        title or "",
-        abstract or "",
-        abstract_max_chars=llm.abstract_max_chars,
-    )
+    prompt = format_extraction_prompt(title or "", abstract or "", llm=llm)
     causal = _llm_cfg_to_causal(llm)
     try:
         decoded = _generate_raw(

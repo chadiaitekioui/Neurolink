@@ -33,6 +33,7 @@ python "$CLUSTER_DIR/check_deps.py"
 
 MODELS=(
   mistralai/Mistral-7B-v0.1
+  mistralai/Mistral-7B-Instruct-v0.2
   ml4pubmed/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext_pub_section
   BrainGPT/BrainGPT-7B-v0.2
   sentence-transformers/all-MiniLM-L6-v2

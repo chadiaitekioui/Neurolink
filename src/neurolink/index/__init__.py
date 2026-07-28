@@ -27,7 +27,13 @@ from .subject import (
     extract_subject,
     heuristic_subjectness,
 )
-from .subject_llm import build_extraction_prompt, parse_llm_direction, validate_llm_direction
+from .subject_llm import (
+    build_extraction_prompt,
+    build_extraction_user_content,
+    format_extraction_prompt,
+    parse_llm_direction,
+    validate_llm_direction,
+)
 from ..utils.pubmed_clean import clean_abstract, structure_abstract, structure_abstract_sections
 from ..utils.pubmed_parse import ParsedArticle, parse_pubmed_text
 

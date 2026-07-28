@@ -86,10 +86,11 @@ ExtractionMode = Literal["rules", "llm", "hybrid"]
 
 @dataclass
 class SubjectLlmConfig:
-    """Causal LM settings for index-time direction extraction (Mistral base, no LoRA)."""
+    """Causal LM settings for index-time direction extraction (instruct, no LoRA)."""
 
-    base_model: str = "mistralai/Mistral-7B-v0.1"
+    base_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     use_4bit: bool = True
+    use_chat_template: bool = True
     max_new_tokens: int = 64
     temperature: float = 0.0
     prompt_max_length: int = 4096

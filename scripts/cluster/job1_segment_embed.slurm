@@ -15,7 +15,7 @@
 #SBATCH -C v100-32g
 
 # Job 1 — index with LLM subject extraction (replaces PubMedBERT segmentation):
-#   Mistral-7B base (4-bit) titre+abstract → 1 research direction
+#   Mistral-7B-Instruct (4-bit) titre+abstract → 1 research direction
 #   then impact → embed (MiniLM).
 # Config: config/index/segment.yaml (extraction_mode: llm).
 # Resumes articles missing from article_segments. Wipe segments/questions/embeddings first if re-indexing.
@@ -27,7 +27,7 @@ source scripts/cluster/env.sh
 
 echo "=== Job 1: LLM extract → impact → embed ==="
 neurolink status
-echo "--- LLM subject extraction (Mistral-7B base, no PubMedBERT) ---"
+echo "--- LLM subject extraction (Mistral-7B-Instruct, no PubMedBERT) ---"
 neurolink segment --config config/index/segment.yaml --device cuda
 echo "--- Impact (rebuild questions from LLM subjects) ---"
 neurolink impact --config config/index/impact.yaml

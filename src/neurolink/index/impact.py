@@ -249,7 +249,7 @@ def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:
         conn.execute("DELETE FROM questions")
         segments = conn.execute(
             """
-            SELECT s.pmid, s.question, s.qc_score, s.results,
+            SELECT s.pmid, s.question, s.qc_score, s.results, s.segmentation_method,
                    a.year, a.title, a.abstract, a.text_work,
                    i.impact_score, i.is_critical
             FROM article_segments s

@@ -4,8 +4,9 @@ subject:
   enabled: true
   extraction_mode: llm
   llm:
-    base_model: mistralai/Mistral-7B-v0.1
+    base_model: mistralai/Mistral-7B-Instruct-v0.2
     use_4bit: true
+    use_chat_template: true
     max_new_tokens: 64
     temperature: 0.0
     prompt_max_length: 4096
