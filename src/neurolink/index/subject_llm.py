@@ -256,32 +256,23 @@ def extract_subject_llm(
         clf = get_subject_classifier(cfg.classifier_model)
     if clf is not None and cfg.use_level2_classifier:
         label, conf = clf.classify(span)
+        # Soft penalties only — format-valid LLM subjects are kept for indexing.
         if label == "noise":
-            score *= 0.15
+            score *= 0.5
         elif label == "methods":
-            score *= 0.35
+            score *= 0.7
         else:
             score = min(1.0, score + 0.15 * conf)
-    if score < cfg.min_subjectness:
-        reason = f"low_subjectness:{label}"
-        logger.info("LLM subject rejected (%s, score=%.2f): %s", reason, score, span)
-        return SubjectResult(
-            text=span,
-            subjectness=score,
-            label=label,
-            source_section="LLM",
-            reject_reason=reason,
-        )
-    if label != "subject" and score < cfg.min_subjectness + 0.15:
-        reason = f"low_subjectness:{label}"
-        logger.info("LLM subject rejected (%s, score=%.2f): %s", reason, score, span)
-        return SubjectResult(
-            text=span,
-            subjectness=score,
-            label=label,
-            source_section="LLM",
-            reject_reason=reason,
-        )
+        if label != "subject":
+            logger.debug(
+                "LLM subject MiniLM label=%s conf=%.2f score=%.2f: %s",
+                label,
+                conf,
+                score,
+                span[:80],
+            )
+    # Format-valid LLM output always enters the index pool (no hard MiniLM reject).
+    score = max(score, cfg.min_subjectness)
 
     return SubjectResult(
         text=span,

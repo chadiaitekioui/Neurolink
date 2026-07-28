@@ -169,8 +169,14 @@ def _resolve_subject_text(
     seg_q = (segment_question or "").strip()
     method = (segmentation_method or "").lower()
     qc = float(qc_score or 0.0)
-    # Keep failed LLM drafts in article_segments; do not rules-reextract or propagate.
-    if "llm" in method and qc < cfg.min_subjectness and seg_q:
+    # LLM drafts: propagate when format-valid; keep junk drafts in segments only.
+    if "llm" in method and seg_q:
+        from ..forecast.predict.direction_filter import classify_direction_rejection
+
+        if classify_direction_rejection(
+            seg_q, min_words=cfg.min_words, max_words=cfg.max_words
+        ) is None:
+            return seg_q, max(qc, cfg.min_subjectness)
         return None, qc
 
     # Re-extract when qc missing/low or segment still looks like a long abstract blob.
