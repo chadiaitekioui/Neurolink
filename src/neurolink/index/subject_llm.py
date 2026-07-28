@@ -24,12 +24,40 @@ from .subject import (
 
 logger = logging.getLogger(__name__)
 
-_USER_PROMPT = """Summarize this neuroscience paper as ONE research direction (8-25 words, noun phrase, no question mark).
+_USER_PROMPT = """Extract the research topic this neuroscience paper studies — the aim/subject only.
+
+Write ONE noun phrase (8-25 words). No question mark.
+Do NOT include findings, results, conclusions, methods details, or phrases like "reveals", "finding that", "showing that", "study explores".
+Focus on what was investigated, not what was found.
+
+Example: Role of cerebellar nuclei in motor cortex control via thalamus
 
 Title: {title}
 
 Abstract:
 {abstract}"""
+
+
+# Drop result / narrative tails that Instruct often appends after the topic.
+_RESULT_CLAUSE = re.compile(
+    r"\s*[,:;]?\s*(?:"
+    r"reveal(?:s|ing)?|showing that|finding that|finds that|demonstrat(?:es|ing) that|"
+    r"suggesting that|indicating that|concluding that|we (?:found|show|demonstrate)|"
+    r"results? (?:show|indicate)|the study (?:finds|shows|reveals)"
+    r")\b.*$",
+    re.IGNORECASE,
+)
+_NARRATIVE_PREFIX = re.compile(
+    r"^(?:"
+    r"(?:neuroscience )?research direction\s*:\s*|"
+    r"study (?:of|on|explores?|investigates?)\s+|"
+    r"investigation of\s+|"
+    r"investigating(?: the)?\s+|"
+    r"discovery of\s+|"
+    r"neuroimaging study reveals?\s+"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def build_extraction_user_content(
@@ -87,14 +115,24 @@ def format_extraction_prompt(
         return user + "\n\nDirection:"
 
 
+def polish_llm_direction(text: str) -> str:
+    """Strip narrative prefixes and results/findings clauses; keep the topic span."""
+    s = strip_list_prefix(text)
+    s = re.sub(r"^(?:direction|research direction)\s*:\s*", "", s, flags=re.I)
+    s = s.strip(" \"'")
+    s = _NARRATIVE_PREFIX.sub("", s).strip()
+    s = _RESULT_CLAUSE.sub("", s).strip(" .;:,")
+    # Drop dangling trailing conjunctions after a cut ("patterns and", "Plasticity and").
+    s = re.sub(r"\b(?:and|or|of|in|the|a|an|with|for|to|by)$", "", s, flags=re.I).strip(" .;:,")
+    return s
+
+
 def parse_llm_direction(raw: str) -> str | None:
-    """Take the first non-empty line from model output."""
+    """Take the first non-empty line from model output, polished to topic-only."""
     if not raw or not raw.strip():
         return None
     for line in raw.splitlines():
-        cleaned = strip_list_prefix(line)
-        cleaned = re.sub(r"^(?:direction|research direction)\s*:\s*", "", cleaned, flags=re.I)
-        cleaned = cleaned.strip(" \"'")
+        cleaned = polish_llm_direction(line)
         if not cleaned or cleaned.lower().startswith(("rules:", "note:")):
             continue
         if re.match(r"^what is the main research direction", cleaned, re.I):
@@ -102,8 +140,8 @@ def parse_llm_direction(raw: str) -> str | None:
         if re.fullmatch(r"[-\s]+", cleaned):
             continue
         return cleaned
-    blob = strip_list_prefix(raw.replace("\n", " "))
-    return blob.strip() or None
+    blob = polish_llm_direction(raw.replace("\n", " "))
+    return blob or None
 
 
 def validate_llm_direction(
