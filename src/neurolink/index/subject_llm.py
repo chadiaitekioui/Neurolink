@@ -127,6 +127,7 @@ def extract_subject_llm(
             prompt,
             causal,
             max_new_tokens=llm.max_new_tokens,
+            n_seq=1,
             do_sample=llm.temperature > 0,
         )
     except Exception as exc:

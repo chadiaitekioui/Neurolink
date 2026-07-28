@@ -1,0 +1,24 @@
+db_path: data/neurolink_sample50.db
+critical_percentile: 0.90
+delay_seconds: 0.1
+subject:
+  enabled: true
+  extraction_mode: llm
+  llm:
+    base_model: mistralai/Mistral-7B-v0.1
+    use_4bit: true
+    max_new_tokens: 64
+    temperature: 0.0
+    prompt_max_length: 4096
+    abstract_max_chars: 3500
+    llm_subjectness_floor: 0.55
+  min_words: 8
+  max_words: 25
+  absolute_min_words: 5
+  min_subjectness: 0.35
+  year_min: 2000
+  year_max: 2027
+  use_level2_classifier: true
+  classifier_model: sentence-transformers/all-MiniLM-L6-v2
+  weight_impact_by_subjectness: true
+  impact_subjectness_floor: 0.15

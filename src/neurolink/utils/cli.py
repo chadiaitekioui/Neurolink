@@ -62,7 +62,19 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
 def cmd_segment(args: argparse.Namespace) -> None:
     device = "cpu" if args.cpu else args.device
-    run_segment(_segment_config_for_cli(args.config, device=device))
+    pmids = None
+    if args.pmids_file:
+        from ..index.segment import load_pmids_file
+
+        pmids = load_pmids_file(args.pmids_file)
+        if not pmids:
+            raise SystemExit(f"No PMIDs in {args.pmids_file}")
+    run_segment(
+        _segment_config_for_cli(args.config, device=device),
+        limit=args.limit,
+        pmids=pmids,
+        force=args.force,
+    )
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
@@ -201,6 +213,22 @@ def main(argv: list[str] | None = None) -> None:
         help="Torch device (default: auto-detect CUDA)",
     )
     seg.add_argument("--cpu", action="store_true", help="Force CPU (overrides --device)")
+    seg.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max articles to segment (missing segments first, ordered by pmid)",
+    )
+    seg.add_argument(
+        "--pmids-file",
+        default=None,
+        help="JSON or text file of PMIDs to segment (optional with --force to re-run)",
+    )
+    seg.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-segment PMIDs even if article_segments already exists",
+    )
     seg.set_defaults(func=cmd_segment)
 
     impc = sub.add_parser("impact", help="OpenAlex citations + impact labels")

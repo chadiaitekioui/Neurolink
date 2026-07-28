@@ -6,10 +6,12 @@ with ``qc_score`` = subjectness in [0, 1].
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..db import Database
 from ..utils.pubmed_clean import (
@@ -46,6 +48,78 @@ class SegmentConfig:
     commit_every: int = 100
     # Extract research-direction subjects (rules + prototype classifier).
     subject: SubjectConfig = field(default_factory=SubjectConfig)
+
+
+def load_pmids_file(path: str | Path) -> list[str]:
+    """Load PMIDs from JSON (list, {\"pmids\": [...]}, or [{\"pmid\": ...}]) or plain text."""
+    p = resolve_path(path)
+    text = p.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    if text.startswith("[") or text.startswith("{"):
+        data = json.loads(text)
+        if isinstance(data, list):
+            if data and isinstance(data[0], dict):
+                return [
+                    str(row["pmid"])
+                    for row in data
+                    if isinstance(row, dict) and row.get("pmid")
+                ]
+            return [str(x) for x in data if str(x).strip()]
+        if isinstance(data, dict):
+            if "pmids" in data:
+                return [str(x) for x in data["pmids"] if str(x).strip()]
+            if "samples" in data:
+                return [
+                    str(row["pmid"])
+                    for row in data["samples"]
+                    if isinstance(row, dict) and row.get("pmid")
+                ]
+        raise ValueError(f"Unsupported PMID JSON in {p}")
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
+
+
+def _fetch_articles_for_segment(
+    conn,
+    *,
+    pmids: list[str] | None,
+    force: bool,
+    limit: int | None,
+) -> list:
+    if pmids:
+        placeholders = ",".join("?" * len(pmids))
+        if force:
+            sql = f"""
+                SELECT a.pmid, a.title, a.abstract, a.text_work
+                FROM articles a
+                WHERE a.pmid IN ({placeholders})
+                ORDER BY a.pmid
+            """
+        else:
+            sql = f"""
+                SELECT a.pmid, a.title, a.abstract, a.text_work
+                FROM articles a
+                LEFT JOIN article_segments s ON a.pmid = s.pmid
+                WHERE a.pmid IN ({placeholders}) AND s.pmid IS NULL
+                ORDER BY a.pmid
+            """
+        rows = conn.execute(sql, pmids).fetchall()
+    else:
+        sql = """
+            SELECT a.pmid, a.title, a.abstract, a.text_work
+            FROM articles a
+            LEFT JOIN article_segments s ON a.pmid = s.pmid
+            WHERE s.pmid IS NULL
+            ORDER BY a.pmid
+        """
+        if limit is not None:
+            sql += " LIMIT ?"
+            rows = conn.execute(sql, (limit,)).fetchall()
+        else:
+            rows = conn.execute(sql).fetchall()
+    if pmids and limit is not None:
+        rows = rows[:limit]
+    return rows
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -191,7 +265,14 @@ def segment_abstract(
     return extracted.text, results, extracted.subjectness
 
 
-def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> int:
+def run_segment(
+    config_path: str | SegmentConfig,
+    run_id: str | None = None,
+    *,
+    limit: int | None = None,
+    pmids: list[str] | None = None,
+    force: bool = False,
+) -> int:
     cfg = load_config(config_path, SegmentConfig)
     db = Database(resolve_path(cfg.db_path))
     db.init_schema()
@@ -200,34 +281,44 @@ def run_segment(config_path: str | SegmentConfig, run_id: str | None = None) -> 
     commit_every = max(1, cfg.commit_every)
 
     with db.connect(readonly=True) as conn:
-        articles = conn.execute(
-            """
-            SELECT a.pmid, a.title, a.abstract, a.text_work
-            FROM articles a
-            LEFT JOIN article_segments s ON a.pmid = s.pmid
-            WHERE s.pmid IS NULL
-            """
-        ).fetchall()
+        articles = _fetch_articles_for_segment(
+            conn, pmids=pmids, force=force, limit=limit
+        )
         total_articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        already = total_articles - len(articles)
+        already = total_articles - conn.execute(
+            """
+            SELECT COUNT(*) FROM articles a
+            INNER JOIN article_segments s ON a.pmid = s.pmid
+            """
+        ).fetchone()[0]
+
+    scope = ""
+    if pmids:
+        scope = f" pmids={len(pmids)}"
+    if limit is not None:
+        scope += f" limit={limit}"
+    if force:
+        scope += " force"
 
     if not articles:
         logger.info(
-            "Segmentation already complete: %d/%d articles",
+            "Segmentation already complete: %d/%d articles (nothing to do%s)",
             already,
             total_articles,
+            scope,
         )
         return 0
 
-    if already:
+    if already and not (pmids or limit is not None):
         logger.info(
-            "Resuming segmentation: %d/%d already done (%d remaining)",
+            "Resuming segmentation: %d/%d already done (%d remaining%s)",
             already,
             total_articles,
             len(articles),
+            scope,
         )
     else:
-        logger.info("Segmentation: %d articles", len(articles))
+        logger.info("Segmentation: %d articles%s", len(articles), scope)
 
     device = resolve_torch_device(cfg.device)
     use_llm = cfg.subject.extraction_mode in ("llm", "hybrid")
