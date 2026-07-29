@@ -12,7 +12,9 @@
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Parallel test: prompt v2 on mistral_base + braingpt (2023, k=10).
+# Parallel test: prompt v2 on mistral_base + braingpt.
+# Context = production build_context_summary (year<=2022); predict 2023 (k=10).
+# Then MiniLM P@k/R@k + format + contamination (same core as Job 2 eval).
 # Does NOT run Job 2 / neurolink compare / LoRA.
 # Output: eval/prompt_smoke_*.json
 
