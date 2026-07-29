@@ -1,4 +1,8 @@
-"""Parallel forecast prompt v2 (smoke test only — does not replace production prompt)."""
+"""Parallel forecast prompt v2 (smoke test only — does not replace production prompt).
+
+Base LMs (Mistral / BrainGPT) continue text; they do not follow ``Write…`` instructions.
+This prompt is a bare list of noun-phrase directions so the next tokens are another direction.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,7 @@ from .literature_lora import (
     resolve_context_year,
 )
 
-# Plain style examples (no list markers — numbered tails make base LMs emit empty 2. 3. 4.).
+# Fixed style seeds (must stay out of CONTEXT copies via blocklist in the smoke runner).
 STYLE_EXAMPLES_V2 = (
     "Role of cerebellar nuclei in top-down motor cortex control",
     "Microglial modulation of synaptic pruning during development",
@@ -18,16 +22,19 @@ STYLE_EXAMPLES_V2 = (
 )
 
 
-def build_context_summary_v2(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
-    """CONTEXT without leading ``1. 2. 3.`` (avoids empty-number continuation)."""
+def _context_direction_lines(
+    conn: sqlite3.Connection,
+    context_year: int,
+    max_q: int,
+) -> list[str]:
+    """Prior themes as bare direction lines (no year tags / numbering)."""
     rows = _fetch_context_question_rows(conn, context_year, max_q)
-    lines = []
+    out: list[str] = []
     for r in rows:
-        yr = r["year"] or "?"
-        text = (r["question_text"] or "").strip()[:280]
+        text = (r["question_text"] or "").strip()
         if text:
-            lines.append(f"[{yr}] {text}")
-    return "\n".join(lines)
+            out.append(text[:200])
+    return out
 
 
 def build_generation_prompt_v2(
@@ -39,22 +46,21 @@ def build_generation_prompt_v2(
     context_year: int | None = None,
     already: list[str] | None = None,
 ) -> str:
-    """Completion prompt ending with ``Direction:`` (not bare ``1.``)."""
+    """Few-shot continuation list; ends with a newline so the model starts a new line.
+
+    ``target_year`` / ``k`` are unused in the text (kept for API parity with prod builder).
+    """
+    del k  # iterative smoke always asks for one next line via continuation
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
-    context = build_context_summary_v2(conn, ctx_year, cfg.max_context_questions)
-    examples = "\n".join(STYLE_EXAMPLES_V2)
-    avoid = ""
+    # Mix: style seeds first, then high-impact corpus lines (same format).
+    lines: list[str] = list(STYLE_EXAMPLES_V2)
+    for text in _context_direction_lines(conn, ctx_year, cfg.max_context_questions):
+        if text.lower() not in {x.lower() for x in lines}:
+            lines.append(text)
     if already:
-        lines = "\n".join(already[-15:])
-        avoid = f"\nAlready written (do not repeat):\n{lines}\n"
-    return (
-        f"Neuroscience forecast for {target_year}.\n\n"
-        f"Prior themes (until {ctx_year}):\n"
-        f"{context}\n"
-        f"{avoid}\n"
-        "Good direction style (different topics; do not copy):\n"
-        f"{examples}\n\n"
-        "Write ONE new research direction: 8-25 words, noun phrase, no question mark, "
-        "no numbering, no headings.\n"
-        "Direction:"
-    )
+        for text in already:
+            t = (text or "").strip()
+            if t and t.lower() not in {x.lower() for x in lines}:
+                lines.append(t)
+    # Trailing newline = open next direction line (no "Direction:" / "1." / "Write").
+    return "\n".join(lines) + "\n"

@@ -104,7 +104,8 @@ def _iterative_v2(
                 torch.cuda.manual_seed_all(llm_cfg.seed + attempt)
             n_seq, do_sample = 1, False
         else:
-            n_seq, do_sample = 1, True
+            n_seq = max(1, min(3, int(llm_cfg.num_return_sequences)))
+            do_sample = True
 
         raw_outputs = _generate_raw(
             prompt,
@@ -129,6 +130,10 @@ def _iterative_v2(
                     for c in parse_generated_directions(decoded, min_len=8)
                 ]
                 line_cands = [c for c in line_cands if c]
+
+            if not line_cands:
+                rejection_counts["empty_raw"] = rejection_counts.get("empty_raw", 0) + 1
+                continue
 
             for s in line_cands:
                 if filter_outputs:
