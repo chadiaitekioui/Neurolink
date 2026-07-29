@@ -1,7 +1,6 @@
-# Parallel prompt-v2 smoke (does NOT replace predict_compare / Job 2).
-# Setup: same DB context as production (build_context_summary, year<=2022)
-#        → Directions 2023 + MiniLM P@k/R@k (+ contamination).
-# Models: mistral_base + braingpt only. Output: eval/prompt_smoke_*.json
+# Parallel prompt smoke (does NOT replace predict_compare / Job 2).
+# Same prompt as train/predict: Year N (30 articles) → Year N+1.
+# Models: mistral_base + braingpt. Output: eval/prompt_smoke_*.json
 db_path: data/neurolink.db
 test_years: [2023]
 top_k: 10
@@ -24,8 +23,8 @@ contamination_corpus_sample: 200
 literature:
   adapter_dir: data/models/literature
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
-  max_context_questions: 20
-  # Explicit: no 2023+ articles in CONTEXT when predicting 2023.
+  max_context_questions: 30
+  # Explicit: context year N=2022 when predicting 2023.
   context_year_max: 2022
   use_4bit: true
   generation_mode: iterative

@@ -41,6 +41,7 @@ def polish_direction(text: str) -> str:
     # Drop markdown / section headers often emitted by BrainGPT.
     s = re.sub(r"^#+\s*", "", s)
     s = re.sub(r"^\d{4}(-\d+)?\s*$", "", s)  # bare year headings
+    s = re.sub(r"(?i)^year\s+\d{4}\s*:?\s*$", "", s)
     s = re.sub(r"^\d+\.\d+\.?\s*", "", s)
     s = re.sub(r"^(?:direction|research direction)\s*:\s*", "", s, flags=re.I)
     s = s.strip(" \"'")

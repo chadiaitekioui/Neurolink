@@ -1,32 +1,17 @@
-"""Parallel forecast prompt v2 (smoke test only — does not replace production prompt).
+"""Parallel smoke prompt — identical to production train/predict prompt.
 
-Same DB selection as production (``_fetch_context_question_rows``), but lines are
-``[year] text`` without numbering and without style examples. Ends with
-``Directions {target_year}:`` for continuation.
+Kept as a thin alias so smoke scripts stay explicit about using the shared
+``build_generation_prompt`` (Year N → Year N+1, no per-article years).
 """
 
 from __future__ import annotations
 
 import sqlite3
 
-from .literature_lora import (
-    LiteratureLoraConfig,
-    _fetch_context_question_rows,
-    resolve_context_year,
-)
+from .literature_lora import LiteratureLoraConfig, build_generation_prompt
 
-
-def _context_lines(conn: sqlite3.Connection, context_year: int, max_q: int) -> list[str]:
-    """Same rows as ``build_context_summary``, without ``1. 2. 3.`` prefixes."""
-    rows = _fetch_context_question_rows(conn, context_year, max_q)
-    lines: list[str] = []
-    for r in rows:
-        text = (r["question_text"] or "").strip()
-        if not text:
-            continue
-        yr = r["year"] or "?"
-        lines.append(f"[{yr}] {text[:280]}")
-    return lines
+# Back-compat name for smoke runners that still import it (empty: no style seeds).
+STYLE_EXAMPLE_TEXTS_V2: tuple[str, ...] = ()
 
 
 def build_generation_prompt_v2(
@@ -38,40 +23,12 @@ def build_generation_prompt_v2(
     context_year: int | None = None,
     already: list[str] | None = None,
 ) -> str:
-    """DB themes (≤ ctx_year) as ``[year] text`` + open ``Directions {target_year}:``.
-
-    Context selection matches production; no style examples, no numbered list.
-    ``k`` unused in the text (API parity); iterative smoke asks one next line.
-    """
-    del k
-    ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
-    if ctx_year >= target_year:
-        raise ValueError(
-            f"context_year ({ctx_year}) must be < target_year ({target_year}) "
-            "so the forecast does not see same-year articles"
-        )
-
-    lines = _context_lines(conn, ctx_year, cfg.max_context_questions)
-    # Hard guard: drop any row that somehow has year >= target.
-    filtered: list[str] = []
-    for line in lines:
-        try:
-            yr = int(line[1:5])  # "[YYYY] ..."
-            if yr >= target_year:
-                continue
-        except (ValueError, IndexError):
-            pass
-        filtered.append(line)
-
-    parts = [
-        f"Prior themes (until {ctx_year}, by impact):",
-        *filtered,
-    ]
-    if already:
-        parts.append("Already listed (do not repeat):")
-        for a in already[-15:]:
-            t = (a or "").strip()
-            if t:
-                parts.append(t)
-    parts.append(f"Directions {target_year}:")
-    return "\n".join(parts) + "\n"
+    """Same string as production ``build_generation_prompt``."""
+    return build_generation_prompt(
+        conn,
+        target_year,
+        cfg,
+        k=k,
+        context_year=context_year,
+        already=already,
+    )

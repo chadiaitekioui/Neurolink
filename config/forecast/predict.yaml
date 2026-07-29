@@ -8,7 +8,7 @@ models:
 seed: 42
 literature:
   adapter_dir: data/models/literature
-  max_context_questions: 20
+  max_context_questions: 30
   backend: lora
   use_4bit: true
   generation_mode: iterative

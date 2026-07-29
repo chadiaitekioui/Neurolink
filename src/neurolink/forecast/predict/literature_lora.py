@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class LiteratureLoraConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
     adapter_dir: str = "data/models/literature"
-    max_context_questions: int = 20
+    max_context_questions: int = 30
     lora_r: int = 16
     lora_alpha: int = 32
     use_4bit: bool = True
@@ -156,12 +156,13 @@ def list_context_questions(
 
 
 def build_context_summary(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
-    """Top-impact questions published on or before context_year (recent window)."""
+    """Top-impact question texts on or before context_year (no per-line years/numbers)."""
     rows = _fetch_context_question_rows(conn, context_year, max_q)
     lines = []
-    for i, r in enumerate(rows, start=1):
-        yr = r["year"] or "?"
-        lines.append(f"{i}. [{yr}] {r['question_text'][:280]}")
+    for r in rows:
+        text = (r["question_text"] or "").strip()
+        if text:
+            lines.append(text[:280])
     return "\n".join(lines)
 
 
@@ -169,14 +170,6 @@ def resolve_context_year(target_year: int, cfg: LiteratureLoraConfig) -> int:
     if cfg.context_year_max is not None:
         return cfg.context_year_max
     return target_year - 1
-
-
-# Fixed few-shots (style only; not taken from the year-specific CONTEXT).
-_STYLE_EXAMPLES = (
-    "Role of cerebellar nuclei in top-down motor cortex control",
-    "Microglial modulation of synaptic pruning during development",
-    "Prefrontal dopamine signaling in flexible decision making",
-)
 
 
 def build_generation_prompt(
@@ -188,32 +181,27 @@ def build_generation_prompt(
     context_year: int | None = None,
     already: list[str] | None = None,
 ) -> str:
-    """Shared forecast prompt — identical for literature_lora, mistral_base, and braingpt.
+    """Shared train/predict prompt: year N themes → continue year N+1.
 
-    Short instruction + style examples; ends with ``1.`` so the model continues a
-    direction rather than regenerating TASK/CONSTRAINTS blocks.
+    Identical for literature_lora, mistral_base, and braingpt.
+    Header shows context year N only; article lines have no year tags.
+    ``k`` kept for API parity (iterative generation always asks one next line).
     """
+    del k
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
+    if ctx_year >= target_year:
+        raise ValueError(
+            f"context_year ({ctx_year}) must be < target_year ({target_year})"
+        )
     context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
-    examples = "\n".join(f"- {ex}" for ex in _STYLE_EXAMPLES)
-    avoid = ""
+    parts = [f"Year {ctx_year}:", context] if context else [f"Year {ctx_year}:"]
     if already:
-        lines = "\n".join(f"- {a}" for a in already[-15:])
-        avoid = f"\nAlready listed (do not repeat):\n{lines}\n"
-    # End on an open "1." so greedy continuation fills the direction body.
-    return (
-        "Neuroscience forecast.\n\n"
-        f"Prior themes (until {ctx_year}, by impact):\n"
-        f"{context}\n"
-        f"{avoid}\n"
-        "Style examples (different topics; do not reuse wording):\n"
-        f"{examples}\n\n"
-        f"Write exactly {k} novel research directions for {target_year}.\n"
-        "Rules: one numbered line each; 8-25 words; noun phrase; no '?'; "
-        "no doi/PMID/years; do not copy Prior themes or Style examples.\n"
-        "Numbered list only — start now:\n"
-        "1."
-    )
+        listed = "\n".join(a.strip() for a in already[-15:] if (a or "").strip())
+        if listed:
+            parts.append("Already listed:")
+            parts.append(listed)
+    parts.append(f"Year {target_year}:")
+    return "\n".join(parts) + "\n"
 
 
 def build_temporal_training_prompt(
@@ -1018,7 +1006,7 @@ def predict_literature_lm(
     context_qs = list_context_questions(conn, N, cfg, context_year=context_year)
     blocklist: set[str] | None = None
     if cfg.reject_context_copies:
-        blocklist = build_context_blocklist([*context_qs, *_STYLE_EXAMPLES])
+        blocklist = build_context_blocklist(context_qs)
 
     audit = GenerationAudit(
         model=model,

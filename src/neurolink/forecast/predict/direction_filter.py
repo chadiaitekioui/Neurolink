@@ -49,9 +49,9 @@ _PROMPT_LEAK = re.compile(
     r")\b"
 )
 _INSTRUCTION_LINE = re.compile(
-    r"(?i)^(CONTEXT|Prior themes|Write (?:exactly|up to)|Numbered list only|Neuroscience forecast)\b"
+    r"(?i)^(CONTEXT|Prior themes|Already listed|Year \d{4}:|Write (?:exactly|up to)|Numbered list only|Neuroscience forecast)\b"
 )
-# Exact copies of prompt few-shots (must stay in sync with literature_lora._STYLE_EXAMPLES).
+# Legacy few-shot copies (no longer injected in prompts; keep rejecting if echoed).
 _STYLE_FEWSHOT_BLOCKLIST = frozenset(
     {
         "role of cerebellar nuclei in top-down motor cortex control",
