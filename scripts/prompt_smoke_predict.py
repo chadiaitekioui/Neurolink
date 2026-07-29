@@ -117,13 +117,20 @@ def _iterative_v2(
             raw_samples.extend(raw_outputs[:1])
 
         for decoded in raw_outputs:
-            for cand in parse_generated_directions(decoded, min_len=8):
-                s = polish_direction(cand)
-                if not s:
-                    rejection_counts["empty_after_polish"] = (
-                        rejection_counts.get("empty_after_polish", 0) + 1
-                    )
-                    continue
+            # Prefer first non-empty polished line; fall back to full parse.
+            line_cands: list[str] = []
+            for line in decoded.splitlines():
+                polished = polish_direction(line)
+                if polished:
+                    line_cands.append(polished)
+            if not line_cands:
+                line_cands = [
+                    polish_direction(c)
+                    for c in parse_generated_directions(decoded, min_len=8)
+                ]
+                line_cands = [c for c in line_cands if c]
+
+            for s in line_cands:
                 if filter_outputs:
                     reason = classify_direction_rejection(s, blocklist=blocklist)
                     if reason is not None:

@@ -32,9 +32,14 @@ _META_PREFIX = re.compile(
 def polish_direction(text: str) -> str:
     """Strip list prefixes, meta echoes, result clauses, and dangling conjunctions."""
     s = strip_list_prefix(text or "")
+    # Drop markdown / section headers often emitted by BrainGPT.
+    s = re.sub(r"^#+\s*", "", s)
+    s = re.sub(r"^\d+\.\d+\.?\s*", "", s)
     s = re.sub(r"^(?:direction|research direction)\s*:\s*", "", s, flags=re.I)
     s = s.strip(" \"'")
-    if re.fullmatch(r"[-\s.#]+", s or ""):
+    if re.fullmatch(r"[-\s.#\d]+", s or ""):
+        return ""
+    if re.match(r"^\d+\.\s*$", s):
         return ""
     s = _META_PREFIX.sub("", s).strip()
     s = _RESULT_CLAUSE.sub("", s).strip(" .;:,")

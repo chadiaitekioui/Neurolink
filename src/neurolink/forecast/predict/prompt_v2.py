@@ -6,16 +6,28 @@ import sqlite3
 
 from .literature_lora import (
     LiteratureLoraConfig,
-    build_context_summary,
+    _fetch_context_question_rows,
     resolve_context_year,
 )
 
-# Numbered style examples (no "-" bullets — those encourage dash degeneration on base LMs).
+# Plain style examples (no list markers — numbered tails make base LMs emit empty 2. 3. 4.).
 STYLE_EXAMPLES_V2 = (
     "Role of cerebellar nuclei in top-down motor cortex control",
     "Microglial modulation of synaptic pruning during development",
     "Prefrontal dopamine signaling in flexible decision making",
 )
+
+
+def build_context_summary_v2(conn: sqlite3.Connection, context_year: int, max_q: int) -> str:
+    """CONTEXT without leading ``1. 2. 3.`` (avoids empty-number continuation)."""
+    rows = _fetch_context_question_rows(conn, context_year, max_q)
+    lines = []
+    for r in rows:
+        yr = r["year"] or "?"
+        text = (r["question_text"] or "").strip()[:280]
+        if text:
+            lines.append(f"[{yr}] {text}")
+    return "\n".join(lines)
 
 
 def build_generation_prompt_v2(
@@ -27,24 +39,22 @@ def build_generation_prompt_v2(
     context_year: int | None = None,
     already: list[str] | None = None,
 ) -> str:
-    """Completion-friendly prompt for Mistral-base / BrainGPT (ends with ``1.``)."""
+    """Completion prompt ending with ``Direction:`` (not bare ``1.``)."""
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
-    context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
-    examples = "\n".join(f"{i}. {ex}" for i, ex in enumerate(STYLE_EXAMPLES_V2, start=1))
+    context = build_context_summary_v2(conn, ctx_year, cfg.max_context_questions)
+    examples = "\n".join(STYLE_EXAMPLES_V2)
     avoid = ""
     if already:
-        lines = "\n".join(f"- {a}" for a in already[-15:])
-        avoid = f"\nAlready listed (do not repeat):\n{lines}\n"
-    # Keep k in the instruction for API parity; smoke uses k=1 iterative.
-    n_line = "one new research direction" if k == 1 else f"exactly {k} novel research directions"
+        lines = "\n".join(already[-15:])
+        avoid = f"\nAlready written (do not repeat):\n{lines}\n"
     return (
-        f"Neuroscience research directions for {target_year}.\n\n"
-        f"Prior themes (until {ctx_year}, by impact):\n"
+        f"Neuroscience forecast for {target_year}.\n\n"
+        f"Prior themes (until {ctx_year}):\n"
         f"{context}\n"
         f"{avoid}\n"
-        "Examples of good directions:\n"
+        "Good direction style (different topics; do not copy):\n"
         f"{examples}\n\n"
-        f"Write {n_line} (8-25 words, noun phrase, no question mark).\n"
-        "Do not copy Prior themes or Examples.\n"
-        "1."
+        "Write ONE new research direction: 8-25 words, noun phrase, no question mark, "
+        "no numbering, no headings.\n"
+        "Direction:"
     )
