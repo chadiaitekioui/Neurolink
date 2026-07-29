@@ -49,7 +49,8 @@ _PROMPT_LEAK = re.compile(
     r")\b"
 )
 _INSTRUCTION_LINE = re.compile(
-    r"(?i)^(CONTEXT|Prior themes|Already listed|Year \d{4}:|Write (?:exactly|up to)|Numbered list only|Neuroscience forecast)\b"
+    r"(?i)^(CONTEXT|Prior themes|Already listed|Year \d{4}:|Write (?:exactly|up to|one)|"
+    r"Numbered list only|Neuroscience forecast|You forecast|Themes through|\[/?INST\])\b"
 )
 # Legacy few-shot copies (no longer injected in prompts; keep rejecting if echoed).
 _STYLE_FEWSHOT_BLOCKLIST = frozenset(

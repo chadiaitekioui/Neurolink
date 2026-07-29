@@ -27,6 +27,9 @@ class LiteratureLoraConfig:
     base_model: str = "mistralai/Mistral-7B-v0.1"
     adapter_dir: str = "data/models/literature"
     max_context_questions: int = 30
+    # continuation = Year N / Year N+1 bare list (base LMs).
+    # instruct = Mistral [INST]…[/INST] task prompt (Instruct LMs).
+    prompt_style: str = "continuation"
     lora_r: int = 16
     lora_alpha: int = 32
     use_4bit: bool = True
@@ -172,22 +175,22 @@ def resolve_context_year(target_year: int, cfg: LiteratureLoraConfig) -> int:
     return target_year - 1
 
 
-def build_generation_prompt(
+def _resolve_prompt_style(cfg: LiteratureLoraConfig) -> str:
+    style = (cfg.prompt_style or "continuation").strip().lower()
+    if style in {"instruct", "instruction", "chat"}:
+        return "instruct"
+    return "continuation"
+
+
+def build_generation_prompt_continuation(
     conn: sqlite3.Connection,
     target_year: int,
     cfg: LiteratureLoraConfig,
     *,
-    k: int,
     context_year: int | None = None,
     already: list[str] | None = None,
 ) -> str:
-    """Shared train/predict prompt: year N themes → continue year N+1.
-
-    Identical for literature_lora, mistral_base, and braingpt.
-    Header shows context year N only; article lines have no year tags.
-    ``k`` kept for API parity (iterative generation always asks one next line).
-    """
-    del k
+    """Bare Year N → Year N+1 continuation (best for base LMs)."""
     ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
     if ctx_year >= target_year:
         raise ValueError(
@@ -202,6 +205,63 @@ def build_generation_prompt(
             parts.append(listed)
     parts.append(f"Year {target_year}:")
     return "\n".join(parts) + "\n"
+
+
+def build_generation_prompt_instruct(
+    conn: sqlite3.Connection,
+    target_year: int,
+    cfg: LiteratureLoraConfig,
+    *,
+    context_year: int | None = None,
+    already: list[str] | None = None,
+) -> str:
+    """Mistral-Instruct [INST] prompt: same N → N+1 task, instruction-friendly."""
+    ctx_year = context_year if context_year is not None else resolve_context_year(target_year, cfg)
+    if ctx_year >= target_year:
+        raise ValueError(
+            f"context_year ({ctx_year}) must be < target_year ({target_year})"
+        )
+    context = build_context_summary(conn, ctx_year, cfg.max_context_questions)
+    avoid = ""
+    if already:
+        listed = "\n".join(f"- {a.strip()}" for a in already[-15:] if (a or "").strip())
+        if listed:
+            avoid = f"\nAlready written (do not repeat):\n{listed}\n"
+    # Trailing space after [/INST] is the Mistral-Instruct generation cue.
+    return (
+        "[INST] You forecast neuroscience research directions.\n"
+        f"Given themes known through year {ctx_year}, write exactly one novel "
+        f"research direction for year {target_year}.\n"
+        "Rules: 8-25 words; noun phrase; no question mark; no years, DOI, or PMID; "
+        "do not copy the themes.\n\n"
+        f"Themes through {ctx_year}:\n"
+        f"{context}\n"
+        f"{avoid}"
+        f"Write one direction for {target_year}: [/INST] "
+    )
+
+
+def build_generation_prompt(
+    conn: sqlite3.Connection,
+    target_year: int,
+    cfg: LiteratureLoraConfig,
+    *,
+    k: int,
+    context_year: int | None = None,
+    already: list[str] | None = None,
+) -> str:
+    """Train/predict prompt — style from ``cfg.prompt_style`` (continuation|instruct).
+
+    ``k`` kept for API parity (iterative generation always asks one next line).
+    """
+    del k
+    if _resolve_prompt_style(cfg) == "instruct":
+        return build_generation_prompt_instruct(
+            conn, target_year, cfg, context_year=context_year, already=already
+        )
+    return build_generation_prompt_continuation(
+        conn, target_year, cfg, context_year=context_year, already=already
+    )
 
 
 def build_temporal_training_prompt(

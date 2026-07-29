@@ -10,6 +10,7 @@ seed: 42
 literature:
   adapter_dir: data/models/literature_instruct
   base_model: mistralai/Mistral-7B-Instruct-v0.2
+  prompt_style: instruct
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   max_context_questions: 30
   backend: lora

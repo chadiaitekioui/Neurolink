@@ -8,10 +8,11 @@ seed: 42
 literature:
   base_model: mistralai/Mistral-7B-v0.1
   adapter_dir: data/models/literature_base
+  prompt_style: continuation
   max_context_questions: 30
   backend: lora
   use_4bit: true
-  train_epochs: 2
+  train_epochs: 1
   train_lr: 0.0001
   train_fraction: 0.7
   max_examples_per_year: 200
