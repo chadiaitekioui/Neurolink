@@ -286,12 +286,9 @@ def run_segment(
             conn, pmids=pmids, force=force, limit=limit
         )
         total_articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        already = total_articles - conn.execute(
-            """
-            SELECT COUNT(*) FROM articles a
-            INNER JOIN article_segments s ON a.pmid = s.pmid
-            """
-        ).fetchone()[0]
+        # Already segmented = total minus the worklist we are about to process
+        # (same pattern as impact/embed). Do not invert the JOIN count.
+        already = total_articles - len(articles)
 
     scope = ""
     if pmids:

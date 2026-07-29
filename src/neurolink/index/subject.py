@@ -156,7 +156,9 @@ class SubjectClassifier:
             model = SentenceTransformer(self.model_name)
             self._model = model
             for label, texts in _PROTOTYPES.items():
-                emb = model.encode(texts, normalize_embeddings=True)
+                emb = model.encode(
+                    texts, normalize_embeddings=True, show_progress_bar=False
+                )
                 self._centroids[label] = np.mean(emb, axis=0)
                 norm = float(np.linalg.norm(self._centroids[label]))
                 if norm > 0:
@@ -176,7 +178,9 @@ class SubjectClassifier:
         import numpy as np
 
         assert self._model is not None
-        emb = self._model.encode([text], normalize_embeddings=True)[0]
+        emb = self._model.encode(
+            [text], normalize_embeddings=True, show_progress_bar=False
+        )[0]
         scores: dict[SubjectLabel, float] = {}
         for label, centroid in self._centroids.items():
             scores[label] = float(np.dot(emb, centroid))
