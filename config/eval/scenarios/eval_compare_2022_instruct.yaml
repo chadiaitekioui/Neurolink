@@ -1,0 +1,20 @@
+# Eval after Instruct-LoRA benchmark (anchor 2022).
+db_path: data/neurolink.db
+test_years: [2023, 2024, 2025]
+top_k: [10, 50]
+models:
+  - literature_lora
+  - mistral_base
+  - braingpt
+semantic_threshold: 0.50
+matcher_backend: minilm
+embed_model: sentence-transformers/all-MiniLM-L6-v2
+critical_only: true
+filter_gt_noise: true
+min_pred_coverage: 0.5
+predict_config: config/forecast/predict_compare_instruct.yaml
+lora_year_max: 2022
+brainbench_enabled: true
+contamination_enabled: true
+brainbench_max_pairs: 50
+contamination_corpus_sample: 200

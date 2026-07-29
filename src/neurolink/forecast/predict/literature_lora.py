@@ -943,6 +943,9 @@ def resolve_literature_llm_cfg(
     model: str,
 ) -> CausalLMConfig:
     """Build CausalLMConfig for literature_lora, mistral_base, or braingpt."""
+    # Baselines always sit on Mistral-7B-v0.1 (BrainGPT adapter is trained on that base).
+    # literature_lora may use Instruct or base via cfg.base_model.
+    mistral_base_id = "mistralai/Mistral-7B-v0.1"
     llm_cfg = CausalLMConfig(
         base_model=cfg.base_model,
         use_4bit=cfg.use_4bit,
@@ -973,19 +976,22 @@ def resolve_literature_llm_cfg(
                 "No local LoRA adapter for year_max=%d — falling back to base Mistral",
                 adapter_year,
             )
+            llm_cfg.base_model = mistral_base_id
     elif model == "braingpt":
         # BrainGPT on HF is a PEFT adapter on Mistral-7B-v0.1 (adapter_config.json + weights).
-        llm_cfg.base_model = cfg.base_model
+        llm_cfg.base_model = mistral_base_id
         llm_cfg.adapter_path = cfg.braingpt_model
         logger.info(
             "Using BrainGPT adapter %s on base %s",
             cfg.braingpt_model,
-            cfg.base_model,
+            mistral_base_id,
         )
     elif model == "mistral_base":
+        llm_cfg.base_model = mistral_base_id
         logger.info("Using base Mistral (no adapter)")
     else:
         logger.warning("Unknown literature LM %r — base Mistral only", model)
+        llm_cfg.base_model = mistral_base_id
     return llm_cfg
 
 

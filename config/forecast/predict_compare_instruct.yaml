@@ -1,5 +1,5 @@
+# Same as predict_compare but LoRA = Instruct adapter (year_max=2022).
 db_path: data/neurolink.db
-# Job 2 benchmark years (do not include 2026+ when LoRA is frozen at 2022).
 test_years: [2023, 2024, 2025]
 top_k: [10, 50]
 models:
@@ -8,8 +8,8 @@ models:
   - braingpt
 seed: 42
 literature:
-  adapter_dir: data/models/literature_base
-  base_model: mistralai/Mistral-7B-v0.1
+  adapter_dir: data/models/literature_instruct
+  base_model: mistralai/Mistral-7B-Instruct-v0.2
   braingpt_model: BrainGPT/BrainGPT-7B-v0.2
   max_context_questions: 30
   backend: lora
