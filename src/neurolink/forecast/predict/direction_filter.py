@@ -185,6 +185,78 @@ def classify_direction_rejection(
     return None
 
 
+def clamp_direction_words(text: str, max_words: int = 25) -> str:
+    """Soft-truncate to ``max_words`` (keeps a usable noun-phrase head)."""
+    s = strip_list_prefix(text or "")
+    if not s:
+        return ""
+    s = re.sub(
+        r"\s*\((?:"
+        r"repeat|"
+        r"(?:second|third|fourth|fifth|sixth)\s+repeat|"
+        r"repeat,?\s+but\s+this\s+time[^)]*"
+        r")\)\s*$",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
+    words = s.split()
+    if len(words) <= max_words:
+        return s
+    return " ".join(words[:max_words]).rstrip(".,;: ")
+
+
+_NEAR_DUP_MODEL = None
+_NEAR_DUP_MODEL_NAME: str | None = None
+
+
+def _near_dup_encoder(model_name: str):
+    global _NEAR_DUP_MODEL, _NEAR_DUP_MODEL_NAME
+    if _NEAR_DUP_MODEL is not None and _NEAR_DUP_MODEL_NAME == model_name:
+        return _NEAR_DUP_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _NEAR_DUP_MODEL = SentenceTransformer(model_name)
+        _NEAR_DUP_MODEL_NAME = model_name
+        return _NEAR_DUP_MODEL
+    except Exception:
+        return None
+
+
+def is_near_duplicate(
+    text: str,
+    already: list[str],
+    *,
+    threshold: float = 0.85,
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+) -> bool:
+    """True if ``text`` is cosine-similar to a kept direction (MiniLM), else exact fallback."""
+    if not already:
+        return False
+    key = normalize_direction_key(text)
+    if not key:
+        return True
+    if key in {normalize_direction_key(a) for a in already}:
+        return True
+    # Strip parenthetical repeat markers before semantic compare.
+    cleaned = re.sub(r"\s*\((?:repeat|third|fourth|fifth|sixth)\s*repeat[^)]*\)\s*$", "", text, flags=re.I)
+    cleaned = cleaned.strip() or text
+    enc = _near_dup_encoder(embed_model)
+    if enc is None:
+        return False
+    try:
+        import numpy as np
+
+        vecs = enc.encode([cleaned, *already], normalize_embeddings=True, show_progress_bar=False)
+        q = vecs[0]
+        refs = vecs[1:]
+        sims = refs @ q
+        return bool(float(np.max(sims)) >= threshold)
+    except Exception:
+        return False
+
+
 _NOISE_REASONS = frozenset(
     {
         "empty",

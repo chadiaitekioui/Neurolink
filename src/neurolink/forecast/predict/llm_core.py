@@ -9,8 +9,10 @@ from dataclasses import dataclass
 
 from .direction_filter import (
     classify_direction_rejection,
+    clamp_direction_words,
     filter_directions,
     filter_directions_audited,
+    is_near_duplicate,
     is_valid_direction,
     strip_list_prefix,
 )
@@ -374,26 +376,35 @@ def generate_directions_iterative(
     *,
     apply_filter: bool = True,
     attempts_factor: float = 2.0,
+    pool_factor: float = 3.0,
+    soft_truncate_words: bool = True,
+    max_direction_words: int = 25,
+    reject_near_duplicates: bool = True,
+    near_duplicate_threshold: float = 0.85,
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
     audit: GenerationAudit | None = None,
     blocklist: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Generate n directions with k=1 prompts (aligned with training_prompt_k=1).
 
-    ``prompt_builder(k, already)`` must return a full prompt requesting ``k`` items.
+    Collects a candidate pool (``n * pool_factor``), filters / near-dedups, then
+    reranks by completion score and returns top-n.
     """
     import torch
 
-    collected: list[tuple[str, float]] = []
-    already: list[str] = []
-    max_attempts = max(n, int(n * max(attempts_factor, 1.0)))
+    pool_target = max(n, int(n * max(pool_factor, 1.0)))
+    max_attempts = max(pool_target, int(pool_target * max(attempts_factor, 1.0)))
     if audit is not None:
         audit.attempts_budget = max_attempts
     per_tokens = max(24, int(cfg.tokens_per_direction))
+    # Prefer sampling for diversity when predicting a top-k set.
     greedy = cfg.temperature <= 0.0
     raw_chunks: list[str] = []
+    collected: list[tuple[str, float]] = []
+    already: list[str] = []
 
     for attempt in range(max_attempts):
-        if len(collected) >= n:
+        if len(collected) >= pool_target:
             break
         if audit is not None:
             audit.attempts_used = attempt + 1
@@ -426,8 +437,14 @@ def generate_directions_iterative(
 
         for cand in candidates:
             s = strip_list_prefix(cand)
+            if soft_truncate_words:
+                s = clamp_direction_words(s, max_words=max_direction_words)
             if apply_filter:
-                reason = classify_direction_rejection(s, blocklist=blocklist)
+                reason = classify_direction_rejection(
+                    s,
+                    max_words=max_direction_words,
+                    blocklist=blocklist,
+                )
                 if reason is not None:
                     if audit is not None:
                         audit.record_rejection(reason, s)
@@ -443,18 +460,25 @@ def generate_directions_iterative(
                 if audit is not None:
                     audit.record_rejection("duplicate", s)
                 continue
+            if reject_near_duplicates and is_near_duplicate(
+                s,
+                already,
+                threshold=near_duplicate_threshold,
+                embed_model=embed_model,
+            ):
+                if audit is not None:
+                    audit.record_rejection("near_duplicate", s)
+                continue
             try:
                 score = score_completion(prompt, s, cfg)
             except Exception:
                 score = 0.0
             collected.append((s, score))
             already.append(s)
-            if len(collected) >= n:
+            if len(collected) >= pool_target:
                 break
 
     collected.sort(key=lambda x: x[1], reverse=True)
-    # Keep first-n by score but preserve diversity already enforced via `already`.
-    # Re-sort only the final list for ranking consistency.
     best: list[tuple[str, float]] = []
     seen: set[str] = set()
     for text, score in collected:
@@ -474,11 +498,16 @@ def generate_directions_iterative(
             audit.record_kept(text)
         audit.log()
     logger.info(
-        "Iterative generation: %d/%d valid directions (attempts=%d used=%d, filter=%s)",
+        "Iterative generation: %d/%d valid directions (pool=%d/%d attempts=%d used=%d, "
+        "filter=%s near_dup=%s soft_trunc=%s)",
         len(best),
         n,
+        len(collected),
+        pool_target,
         max_attempts,
         audit.attempts_used if audit else max_attempts,
         apply_filter,
+        reject_near_duplicates,
+        soft_truncate_words,
     )
     return best

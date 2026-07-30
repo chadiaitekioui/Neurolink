@@ -1,4 +1,5 @@
 # Same as predict_compare but LoRA = Instruct adapter (year_max=2022).
+# prompt_style=instruct applies ONLY to literature_lora; baselines stay continuation.
 db_path: data/neurolink.db
 test_years: [2023, 2024, 2025]
 top_k: [10, 50]
@@ -41,9 +42,15 @@ literature:
   filter_outputs: true
   reject_context_copies: true
   max_generation_attempts_factor: 2.0
+  pool_factor: 3.0
+  soft_truncate_words: true
+  max_direction_words: 25
+  reject_near_duplicates: true
+  near_duplicate_threshold: 0.85
   llm:
     max_new_tokens: 96
     tokens_per_direction: 48
-    temperature: 0.0
-    top_p: 1.0
+    temperature: 0.7
+    top_p: 0.9
     seed: 42
+    num_return_sequences: 3

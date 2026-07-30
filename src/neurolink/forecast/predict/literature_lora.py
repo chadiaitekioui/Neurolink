@@ -66,6 +66,12 @@ class LiteratureLoraConfig:
     filter_outputs: bool = True
     reject_context_copies: bool = True  # drop preds that recycle Prior themes / few-shots
     max_generation_attempts_factor: float = 2.0
+    # Inference diversity: sample a pool then rerank by completion score.
+    pool_factor: float = 3.0
+    soft_truncate_words: bool = True
+    max_direction_words: int = 25
+    reject_near_duplicates: bool = True
+    near_duplicate_threshold: float = 0.85
     llm: CausalLMConfig = field(default_factory=CausalLMConfig)
 
 
@@ -1064,12 +1070,19 @@ def predict_literature_lm(
     model: str = "literature_lora",
 ) -> list[tuple[str, float]]:
     """Generate novel research directions for year N with a literature LM variant."""
+    from dataclasses import replace
+
     year_max = N - 1
     context_year = resolve_context_year(N, cfg)
     llm_cfg = resolve_literature_llm_cfg(cfg, year_max, model)
     mode = (cfg.generation_mode or "iterative").lower().strip()
 
-    context_qs = list_context_questions(conn, N, cfg, context_year=context_year)
+    # Instruct [INST] prompt only for the Instruct LoRA slot; baselines stay continuation.
+    prompt_cfg = cfg
+    if model != "literature_lora" and _resolve_prompt_style(cfg) == "instruct":
+        prompt_cfg = replace(cfg, prompt_style="continuation")
+
+    context_qs = list_context_questions(conn, N, prompt_cfg, context_year=context_year)
     blocklist: set[str] | None = None
     if cfg.reject_context_copies:
         blocklist = build_context_blocklist(context_qs)
@@ -1089,7 +1102,7 @@ def predict_literature_lm(
     try:
         if mode == "batch":
             prompt = build_generation_prompt(
-                conn, N, cfg, k=k, context_year=context_year
+                conn, N, prompt_cfg, k=k, context_year=context_year
             )
             audit.prompt_chars = len(prompt)
             oversample = 1 if cfg.llm.temperature <= 0.0 else 3
@@ -1107,13 +1120,12 @@ def predict_literature_lm(
             return build_generation_prompt(
                 conn,
                 N,
-                cfg,
+                prompt_cfg,
                 k=n_req,
                 context_year=context_year,
                 already=already,
             )
 
-        # Prime prompt stats from first builder call.
         first_prompt = _builder(1, [])
         audit.prompt_chars = len(first_prompt)
 
@@ -1123,6 +1135,12 @@ def predict_literature_lm(
             k,
             apply_filter=cfg.filter_outputs,
             attempts_factor=cfg.max_generation_attempts_factor,
+            pool_factor=cfg.pool_factor,
+            soft_truncate_words=cfg.soft_truncate_words,
+            max_direction_words=cfg.max_direction_words,
+            reject_near_duplicates=cfg.reject_near_duplicates,
+            near_duplicate_threshold=cfg.near_duplicate_threshold,
+            embed_model=cfg.embed_model,
             audit=audit,
             blocklist=blocklist,
         )
