@@ -58,7 +58,7 @@ LoRA leads generative models on P@50 / R@50 and recycles the **prompt** much les
 
 ![conditional_beyond by year vs corpus MiniLM retrieval](figure_conditional_beyond.svg)
 
-**Takeaway:** among generative models, LoRA roughly **doubles** the incremental GT coverage beyond retrieval, while remaining strongly corpus-like (high corpus recycling — continuity, not pure invention).
+**Takeaway:** among generative models, LoRA roughly **doubles** the incremental GT coverage beyond retrieval, while remaining strongly corpus-like (continuity of the corpus, not pure invention).
 
 ## Installation
 
