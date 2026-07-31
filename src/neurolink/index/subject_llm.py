@@ -23,7 +23,8 @@ from .subject import (
 
 logger = logging.getLogger(__name__)
 
-_USER_PROMPT = """Extract the research topic this neuroscience paper studies — the aim/subject only.
+# Original bench22 prompt (topic / noun-phrase style).
+_USER_PROMPT_TOPIC = """Extract the research topic this neuroscience paper studies — the aim/subject only.
 
 Write ONE noun phrase (8-25 words). No question mark.
 Do NOT include findings, results, conclusions, methods details, or phrases like "reveals", "finding that", "showing that", "study explores".
@@ -36,6 +37,28 @@ Title: {title}
 Abstract:
 {abstract}"""
 
+# Specific-direction experiment: precise research direction, not an abstract paraphrase.
+_USER_PROMPT_SPECIFIC = """Extract the precise neuroscience research direction this paper pursues — the specific aim/subject only.
+
+Write ONE specific research direction (8-25 words). No question mark.
+Be concrete: phenomenon + population/model + angle. Do NOT write a broad paper-title paraphrase or an abstract summary.
+Do NOT include findings, results, conclusions, methods details, or phrases like "reveals", "finding that", "showing that", "study explores".
+Focus on what was investigated, not what was found.
+
+Examples:
+- Investigating the impact of prenatal maternal stress on cortical maturation and behavior in mice
+- A human brain atlas of subcellular protein localization in 1000+ cell types, organized by cell type and brain region
+
+Title: {title}
+
+Abstract:
+{abstract}"""
+
+_PROMPTS = {
+    "topic": _USER_PROMPT_TOPIC,
+    "specific": _USER_PROMPT_SPECIFIC,
+}
+
 
 # Drop result / narrative tails that Instruct often appends after the topic.
 _RESULT_CLAUSE = re.compile(
@@ -46,7 +69,8 @@ _RESULT_CLAUSE = re.compile(
     r")\b.*$",
     re.IGNORECASE,
 )
-_NARRATIVE_PREFIX = re.compile(
+# Classic topic polish: strip narrative wrappers including "Investigating…".
+_NARRATIVE_PREFIX_TOPIC = re.compile(
     r"^(?:"
     r"(?:neuroscience )?research direction\s*:\s*|"
     r"study (?:of|on|explores?|investigates?)\s+|"
@@ -57,6 +81,27 @@ _NARRATIVE_PREFIX = re.compile(
     r")",
     re.IGNORECASE,
 )
+# Specific polish: keep actionable prefixes like "Investigating…".
+_NARRATIVE_PREFIX_SPECIFIC = re.compile(
+    r"^(?:"
+    r"(?:neuroscience )?research direction\s*:\s*|"
+    r"study (?:explores?|investigates?)\s+|"
+    r"discovery of\s+|"
+    r"neuroimaging study reveals?\s+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _resolve_prompt_style(style: str | None) -> str:
+    key = (style or "topic").strip().lower()
+    if key in {"specific", "precise", "direction"}:
+        return "specific"
+    return "topic"
+
+
+def _prompt_template(style: str | None) -> str:
+    return _PROMPTS[_resolve_prompt_style(style)]
 
 
 def build_extraction_user_content(
@@ -64,12 +109,13 @@ def build_extraction_user_content(
     abstract: str,
     *,
     abstract_max_chars: int = 3500,
+    prompt_style: str = "topic",
 ) -> str:
     title = polish_field(title or "Untitled")
     body = polish_field(abstract or "")
     if len(body) > abstract_max_chars:
         body = body[: abstract_max_chars - 3].rstrip() + "..."
-    return _USER_PROMPT.format(title=title, abstract=body)
+    return _prompt_template(prompt_style).format(title=title, abstract=body)
 
 
 def build_extraction_prompt(
@@ -77,10 +123,14 @@ def build_extraction_prompt(
     abstract: str,
     *,
     abstract_max_chars: int = 3500,
+    prompt_style: str = "topic",
 ) -> str:
     """Plain user message (no chat template). Kept for tests and debugging."""
     return build_extraction_user_content(
-        title, abstract, abstract_max_chars=abstract_max_chars
+        title,
+        abstract,
+        abstract_max_chars=abstract_max_chars,
+        prompt_style=prompt_style,
     )
 
 
@@ -95,6 +145,7 @@ def format_extraction_prompt(
         title,
         abstract,
         abstract_max_chars=llm.abstract_max_chars,
+        prompt_style=llm.prompt_style,
     )
     if not llm.use_chat_template:
         return user + "\n\nDirection:"
@@ -114,24 +165,29 @@ def format_extraction_prompt(
         return user + "\n\nDirection:"
 
 
-def polish_llm_direction(text: str) -> str:
+def polish_llm_direction(text: str, *, prompt_style: str = "topic") -> str:
     """Strip narrative prefixes and results/findings clauses; keep the topic span."""
     s = strip_list_prefix(text)
     s = re.sub(r"^(?:direction|research direction)\s*:\s*", "", s, flags=re.I)
     s = s.strip(" \"'")
-    s = _NARRATIVE_PREFIX.sub("", s).strip()
+    prefix = (
+        _NARRATIVE_PREFIX_SPECIFIC
+        if _resolve_prompt_style(prompt_style) == "specific"
+        else _NARRATIVE_PREFIX_TOPIC
+    )
+    s = prefix.sub("", s).strip()
     s = _RESULT_CLAUSE.sub("", s).strip(" .;:,")
     # Drop dangling trailing conjunctions after a cut ("patterns and", "Plasticity and").
     s = re.sub(r"\b(?:and|or|of|in|the|a|an|with|for|to|by)$", "", s, flags=re.I).strip(" .;:,")
     return s
 
 
-def parse_llm_direction(raw: str) -> str | None:
+def parse_llm_direction(raw: str, *, prompt_style: str = "topic") -> str | None:
     """Take the first non-empty line from model output, polished to topic-only."""
     if not raw or not raw.strip():
         return None
     for line in raw.splitlines():
-        cleaned = polish_llm_direction(line)
+        cleaned = polish_llm_direction(line, prompt_style=prompt_style)
         if not cleaned or cleaned.lower().startswith(("rules:", "note:")):
             continue
         if re.match(r"^what is the main research direction", cleaned, re.I):
@@ -139,7 +195,7 @@ def parse_llm_direction(raw: str) -> str | None:
         if re.fullmatch(r"[-\s]+", cleaned):
             continue
         return cleaned
-    blob = polish_llm_direction(raw.replace("\n", " "))
+    blob = polish_llm_direction(raw.replace("\n", " "), prompt_style=prompt_style)
     return blob or None
 
 
@@ -224,9 +280,13 @@ def extract_subject_llm(
         return None
 
     raw = decoded[0] if decoded else ""
-    parsed = parse_llm_direction(raw)
+    parsed = parse_llm_direction(raw, prompt_style=llm.prompt_style)
     if not parsed:
-        logger.info("LLM subject rejected (empty_parse): raw=%r", raw[:160])
+        logger.info(
+            "LLM subject rejected (empty_parse, style=%s): raw=%r",
+            llm.prompt_style,
+            raw[:160],
+        )
         return None
 
     span, fmt_reason = diagnose_llm_direction(

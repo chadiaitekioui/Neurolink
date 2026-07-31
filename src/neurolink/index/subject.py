@@ -83,6 +83,8 @@ class SubjectLlmConfig:
     prompt_max_length: int = 4096
     abstract_max_chars: int = 3500
     llm_subjectness_floor: float = 0.55
+    # "topic" = original bench22 noun-phrase prompt; "specific" = precise research direction.
+    prompt_style: str = "topic"
 
 
 @dataclass
@@ -341,6 +343,18 @@ def _fetch_articles_for_directions(
         return list(rows), len(pmids) - len(rows)
 
     already = conn.execute("SELECT COUNT(*) FROM article_segments").fetchone()[0]
+    if force:
+        q = """
+            SELECT pmid, title, abstract, text_work
+            FROM articles
+            ORDER BY pmid
+        """
+        if limit is not None and limit > 0:
+            rows = conn.execute(q + " LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = conn.execute(q).fetchall()
+        return list(rows), 0
+
     q = """
         SELECT a.pmid, a.title, a.abstract, a.text_work
         FROM articles a
@@ -382,7 +396,11 @@ def run_directions(
     pmids: list[str] | None = None,
     force: bool = False,
 ) -> int:
-    """Batch-extract research directions for articles missing from ``article_segments``."""
+    """Batch-extract research directions into ``article_segments``.
+
+    With ``force=True``, re-extracts all articles (or the PMID list / limit),
+    upserting existing rows. Without ``force``, only articles missing a segment.
+    """
     cfg = (
         load_config(config_path, DirectionConfig)
         if isinstance(config_path, str)

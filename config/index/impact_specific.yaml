@@ -1,6 +1,6 @@
-db_path: data/neurolink.db
-device: auto
-# LLM research-direction extraction (Mistral-Instruct).
+db_path: data/neurolink_specific.db
+critical_percentile: 0.90
+delay_seconds: 0.1
 subject:
   enabled: true
   extraction_mode: llm
@@ -13,7 +13,7 @@ subject:
     prompt_max_length: 4096
     abstract_max_chars: 3500
     llm_subjectness_floor: 0.55
-    prompt_style: topic  # original bench22 noun-phrase prompt
+    prompt_style: specific
   min_words: 8
   max_words: 25
   absolute_min_words: 5

@@ -14,6 +14,7 @@ subject:
     prompt_max_length: 4096
     abstract_max_chars: 3500
     llm_subjectness_floor: 0.55
+    prompt_style: topic
   min_words: 8
   max_words: 25
   absolute_min_words: 5

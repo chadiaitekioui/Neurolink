@@ -1,0 +1,47 @@
+# LoRA train on specific-direction DB. year_max via CLI (--year-max 2022).
+db_path: data/neurolink_specific.db
+test_years: [2023, 2024, 2025]
+top_k: [10, 50]
+models:
+  - literature_lora
+seed: 42
+literature:
+  base_model: mistralai/Mistral-7B-v0.1
+  adapter_dir: data/models/literature_base_specific
+  prompt_style: continuation
+  max_context_questions: 30
+  backend: lora
+  use_4bit: true
+  train_epochs: 1
+  train_lr: 0.0001
+  train_fraction: 0.7
+  max_examples_per_year: 200
+  train_sampling: impact_weighted
+  grad_accumulation_steps: 16
+  shuffle_training_examples: true
+  use_hf_trainer: true
+  train_save_steps: 100
+  train_save_total_limit: 2
+  train_log_every: 50
+  train_val_fraction: 0.1
+  train_eval_steps: 100
+  train_early_stopping_patience: 3
+  train_max_length: 1024
+  error_train_epochs: 2
+  error_max_examples: 50
+  semantic_threshold: 0.50
+  matcher_backend: minilm
+  embed_model: sentence-transformers/all-MiniLM-L6-v2
+  error_critical_only: true
+  braingpt_model: BrainGPT/BrainGPT-7B-v0.2
+  training_prompt_k: 1
+  generation_mode: iterative
+  filter_outputs: true
+  reject_context_copies: true
+  max_generation_attempts_factor: 2.0
+  llm:
+    max_new_tokens: 96
+    tokens_per_direction: 48
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42
