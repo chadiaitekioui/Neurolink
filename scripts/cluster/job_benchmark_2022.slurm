@@ -15,8 +15,8 @@
 #SBATCH -C v100-32g
 
 # Benchmark only (no train) — needs literature_base year_max=2022.
-# Round A: LoRA-base vs mistral_base vs braingpt (2023-2025) + eval
-# Round B: auto if data/models/literature_instruct/year_max_2022/lora/ exists
+# 1) LoRA-base vs mistral_base vs braingpt (years 2023–2025) + full eval (incl. stress)
+# 2) LoRA-instruct vs same baselines — only if the instruct adapter exists
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
@@ -30,31 +30,31 @@ test -d data/models/literature_base/year_max_2022/lora || {
 HAS_INSTRUCT=0
 if test -d data/models/literature_instruct/year_max_2022/lora; then
   HAS_INSTRUCT=1
-  echo "INFO: found literature_instruct adapter — will run Round B"
+  echo "INFO: found literature_instruct adapter — will also run LoRA-instruct compare"
 else
-  echo "INFO: no literature_instruct adapter — Round B skipped"
+  echo "INFO: no literature_instruct adapter — LoRA-instruct compare skipped"
 fi
 
-echo "=== Benchmark A: LoRA BASE + mistral_base + braingpt ==="
+echo "=== Compare: LoRA-base + mistral_base + braingpt ==="
 neurolink compare \
   --lora-year-max 2022 \
   --config config/forecast/predict_compare.yaml
 
-echo "=== Eval A (base LoRA) ==="
+echo "=== Eval: LoRA-base round (P@k + stress / beyond-retrieval + BrainBench) ==="
 neurolink eval --config config/eval/scenarios/eval_compare_2022.yaml
 cp -f eval/summary.md eval/summary_job2_base.md
 
 if [[ "$HAS_INSTRUCT" -eq 1 ]]; then
-  echo "=== Benchmark B: LoRA INSTRUCT + mistral_base + braingpt ==="
+  echo "=== Compare: LoRA-instruct + mistral_base + braingpt ==="
   neurolink compare \
     --lora-year-max 2022 \
     --config config/forecast/predict_compare_instruct.yaml
 
-  echo "=== Eval B (instruct LoRA) ==="
+  echo "=== Eval: LoRA-instruct round ==="
   neurolink eval --config config/eval/scenarios/eval_compare_2022_instruct.yaml
   cp -f eval/summary.md eval/summary_job2_instruct.md
 else
-  echo "=== Round B skipped ==="
+  echo "=== LoRA-instruct compare skipped ==="
 fi
 
 echo "=== Done ==="

@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> None:
     idx.set_defaults(func=cmd_index)
 
     pr = sub.add_parser("predict", help="Generate predictions")
-    pr.add_argument("--config", default="config/forecast/predict.yaml")
+    pr.add_argument("--config", default="config/forecast/predict_compare.yaml")
     pr.set_defaults(func=cmd_predict)
 
     tr = sub.add_parser("train-literature", help="Train literature LoRA up to year_max")

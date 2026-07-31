@@ -14,11 +14,11 @@
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Job 3 — Train LoRA year_max=2025 (training v2), benchmark 2026 (3 LLMs), predict 2027 (LoRA 2025).
-# Train: config/forecast/predict_literature.yaml (same v2 hyperparams as Job 2)
-# Compare: config/forecast/predict_compare.yaml — same 3-LLM prompt/temp as Job 2
-# Eval: config/eval/scenarios/eval_compare_2025.yaml (lora_year_max=2025, same eval flags as Job 2)
-# predict_2027.yaml: benchmark_lora_year_max=2025, greedy temp=0, no eval for 2027
+# Job 3 — Train LoRA at year_max=2025, benchmark year 2026 (3 LLMs), predict year 2027.
+# Train: config/forecast/predict_literature.yaml (same hyperparameters as Job-2 LoRA-base)
+# Compare: config/forecast/predict_compare.yaml (LoRA vs mistral_base vs braingpt)
+# Eval: config/eval/scenarios/eval_compare_2025.yaml (adapter frozen at year_max=2025)
+# Predict 2027: config/forecast/scenarios/predict_2027.yaml (greedy decoding, no eval)
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"

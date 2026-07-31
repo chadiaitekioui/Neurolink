@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from .direction_filter import (
     classify_direction_rejection,
     clamp_direction_words,
-    filter_directions,
     filter_directions_audited,
     is_near_duplicate,
     is_valid_direction,
@@ -137,10 +136,6 @@ def parse_generated_directions(text: str, min_len: int = 15) -> list[str]:
         if len(blob) >= min_len:
             out.append(blob)
     return out
-
-
-# Backward-compatible alias
-parse_generated_questions = parse_generated_directions
 
 
 def score_completion(prompt: str, completion: str, cfg: CausalLMConfig) -> float:
@@ -363,10 +358,6 @@ def generate_directions_batch(
             audit.record_kept(text)
         audit.log()
     return result
-
-
-# Backward-compatible alias
-generate_questions = generate_directions_batch
 
 
 def generate_directions_iterative(

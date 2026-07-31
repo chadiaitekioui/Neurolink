@@ -1,10 +1,11 @@
-"""Evaluation: MiniLM P@k/R@k, BrainBench perplexity discrimination, LoRA contamination."""
+"""Evaluation: MiniLM P@k/R@k, stress/beyond-retrieval, BrainBench, LoRA contamination."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..db import Database
 from ..utils.config import infer_test_years, load_config, make_run_id, resolve_path
@@ -41,6 +42,12 @@ class EvalConfig:
     contamination_enabled: bool = True
     brainbench_max_pairs: int = 50
     contamination_corpus_sample: int = 200
+    # First-class stress / beyond-retrieval block (MiniLM offline; no LM regen).
+    stress_enabled: bool = True
+    stress_corpus_sample: int = 4000
+    stress_near_threshold_band: float = 0.05
+    stress_length_control_words: int = 12
+    stress_max_context_questions: int = 30
 
 
 def _llm_cfg_for_model(lit_cfg, year_max: int, model: str):
@@ -84,6 +91,27 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
         logger.info(
             "Eval: using literature.benchmark_lora_year_max=%d from predict config",
             lit_cfg.benchmark_lora_year_max,
+        )
+
+    stress_cfg = None
+    stress_baselines_cache: dict[tuple[int, int], dict[str, Any]] = {}
+    if cfg.stress_enabled:
+        from .stress import stress_config_from_eval
+
+        stress_cfg = stress_config_from_eval(
+            top_k=cfg.top_k,
+            semantic_threshold=cfg.semantic_threshold,
+            embed_model=cfg.embed_model,
+            critical_only=cfg.critical_only,
+            filter_gt_noise=cfg.filter_gt_noise,
+            corpus_sample=cfg.stress_corpus_sample,
+            near_threshold_band=cfg.stress_near_threshold_band,
+            length_control_words=cfg.stress_length_control_words,
+            max_context_questions=cfg.stress_max_context_questions,
+        )
+        logger.info(
+            "Stress metrics enabled (corpus_sample=%d, beyond-retrieval + baselines)",
+            cfg.stress_corpus_sample,
         )
 
     with db.connect() as conn:
@@ -210,6 +238,51 @@ def run_eval(config_path: str | EvalConfig, run_id: str | None = None) -> int:
                         eval_run=eval_run,
                         k=k,
                     )
+
+                if stress_cfg is not None and pred_run_id:
+                    from .stress import evaluate_cell, flatten_stress_metrics
+
+                    lit_stress = replace(
+                        lit_cfg,
+                        max_context_questions=stress_cfg.max_context_questions,
+                    )
+                    cell = evaluate_cell(
+                        conn,
+                        year=N,
+                        model=model,
+                        predict_run_id=pred_run_id,
+                        cfg=stress_cfg,
+                        lit_cfg=lit_stress,
+                        baselines_cache=stress_baselines_cache,
+                        preds=preds,
+                        refs=[r["text"] for r in refs],
+                    )
+                    if cell:
+                        n_stress = 0
+                        for metric, k_s, val in flatten_stress_metrics(cell):
+                            _append_metric(
+                                rows_to_insert,
+                                year=N,
+                                model=model,
+                                metric=metric,
+                                value=val,
+                                eval_run=eval_run,
+                                k=k_s,
+                            )
+                            n_stress += 1
+                        cond = (
+                            (cell.get("beyond_retrieval") or {})
+                            .get(str(max(cfg.top_k) if cfg.top_k else 50), {})
+                            .get("corpus_minilm", {})
+                            .get("conditional_beyond")
+                        )
+                        logger.info(
+                            "Stress %s year=%d: %d metrics%s",
+                            model,
+                            N,
+                            n_stress,
+                            f", conditional_beyond@max_k={cond:.3f}" if cond is not None else "",
+                        )
 
                 if model not in LLM_LITERATURE_MODELS:
                     continue
@@ -368,7 +441,10 @@ def write_summary(db: Database, run_id: str, path: Path) -> None:
         "`format_*` metrics track research-direction validity (noise, DOI, word length). "
         "GT noise can be dropped via `filter_gt_noise`. "
         "`recall@k_normalized` = R@k / min(k, N_GT) × N_GT = (# GT matchées) / min(k, N_GT) "
-        "(fraction du plafond théorique k/N_GT, bornée par 1).\n\n",
+        "(fraction du plafond théorique k/N_GT, bornée par 1). "
+        "Stress block (`stress_enabled`): `baseline_*_precision`, "
+        "`beyond_conditional_corpus_minilm` (speaking success scale), "
+        "`beyond_incremental_*`, `stress_novelty`, diversity / near-threshold / length-control.\n\n",
         "| Year | Model | Metric | k | Value |\n",
         "|------|-------|--------|---|-------|\n",
     ]

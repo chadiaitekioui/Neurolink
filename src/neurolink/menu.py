@@ -51,7 +51,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 PREDICT_LITERATURE_CONFIG = "config/forecast/predict_literature.yaml"
 PREDICT_COMPARE_CONFIG = "config/forecast/predict_compare.yaml"
-EVAL_LITERATURE_CONFIG = "config/eval/eval_literature.yaml"
 EVAL_COMPARE_CONFIG = "config/eval/eval_compare.yaml"
 INDEX_PIPELINE_CONFIG = "config/index/pipeline.yaml"
 COLLECT_CONFIG = "config/index/collect.yaml"
@@ -79,7 +78,7 @@ def _banner() -> None:
             1 - Index: collect PubMed → segment → impact → embed.\n
             2 - Literature LoRA: fine-tune Mistral-7B on temporal question pairs.\n
             3 - Benchmark: compare LoRA vs Mistral-7B vs BrainGPT on years after a saved LoRA year_max.\n
-            5 - Complete workflow (GPU): full cluster run see Protocol.md.\n""",
+            5 - Complete workflow (GPU): full cluster run (index → LoRA → benchmark).\n""",
             border_style="green",
         )
     )

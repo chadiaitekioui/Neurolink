@@ -6,6 +6,7 @@ from .matching import EmbeddingMatcher, TfidfMatcher, make_matcher
 from .metrics import EvalConfig, run_eval, write_summary
 from .perplexity import ZlibPplStats, zlib_perplexity_ratio
 from .pipeline import EvalPipelineConfig, run_eval_layer
+from .stress import StressConfig, evaluate_cell, flatten_stress_metrics
 
 __all__ = [
     "BrainBenchResult",
@@ -13,8 +14,11 @@ __all__ = [
     "EmbeddingMatcher",
     "EvalConfig",
     "EvalPipelineConfig",
+    "StressConfig",
     "TfidfMatcher",
     "ZlibPplStats",
+    "evaluate_cell",
+    "flatten_stress_metrics",
     "make_matcher",
     "paired_perplexity_accuracy",
     "run_brainbench_year",

@@ -1,5 +1,0 @@
-track: literature
-db_path: data/neurolink.db
-predict_config: config/forecast/predict_compare.yaml
-stages:
-  - predict

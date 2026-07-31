@@ -52,7 +52,7 @@ _INSTRUCTION_LINE = re.compile(
     r"(?i)^(CONTEXT|Prior themes|Already listed|Year \d{4}:|Write (?:exactly|up to|one)|"
     r"Numbered list only|Neuroscience forecast|You forecast|Themes through|\[/?INST\])\b"
 )
-# Legacy few-shot copies (no longer injected in prompts; keep rejecting if echoed).
+# Few-shot direction copies no longer injected into prompts; still reject if the model echoes them.
 _STYLE_FEWSHOT_BLOCKLIST = frozenset(
     {
         "role of cerebellar nuclei in top-down motor cortex control",

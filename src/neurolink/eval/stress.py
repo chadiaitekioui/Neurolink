@@ -1,79 +1,40 @@
-#!/usr/bin/env python3
-"""Offline stress metrics for Job-2 benches (no LM regeneration).
+"""Stress / beyond-retrieval metrics (MiniLM offline, no LM regeneration).
 
-Computes indicators missing from the main eval summary:
+Computed inside ``run_eval`` and written to ``evaluations``:
   - retrieval baselines (context copy, corpus BM25, corpus MiniLM)
   - length-controlled MiniLM P@k / R@k
   - near-threshold match diagnostics
-  - prediction diversity (trigrams + embedding pairwise distance)
-  - composite novelty KPIs (P − recycling, etc.)
-  - bounded recall@k_normalized
-
-Writes a single JSON under eval/ (default: eval/stress_metrics_<ts>.json).
-
-Example (bench22_inst_base Round A + B)::
-
-  .venv/bin/python scripts/eval_stress_metrics.py \\
-    --db-path bench22_inst_base/data/neurolink.db \\
-    --out-dir bench22_inst_base/eval \\
-    --predict-run-id benchmark_20260730T143510Z:round_a \\
-    --predict-run-id benchmark_20260730T195112Z:round_b
+  - prediction diversity
+  - novelty / extension composites
+  - beyond-retrieval KPIs (conditional_beyond, incremental_recall)
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import math
 import re
 import sqlite3
-import sys
 from collections import Counter
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(_ROOT / "src"))
+from ..forecast.predict.direction_filter import is_clean_gt_text
+from ..forecast.predict.literature_lora import LiteratureLoraConfig, list_context_questions
 
-from neurolink.forecast.predict.direction_filter import is_clean_gt_text
-from neurolink.forecast.predict.literature_lora import LiteratureLoraConfig, list_context_questions
-from neurolink.utils.config import load_config, resolve_path
-
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-logger = logging.getLogger("eval_stress")
+logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[A-Za-z0-9α-ωΑ-Ω]+(?:[-'][A-Za-z0-9α-ωΑ-Ω]+)?")
 _EMBED_CACHE: dict[str, np.ndarray] = {}
 _ST_MODEL_CACHE: dict[str, object] = {}
 
 
-def _st_model(model_name: str):
-    """Load SentenceTransformer once per process (MiniLM required)."""
-    if model_name in _ST_MODEL_CACHE:
-        return _ST_MODEL_CACHE[model_name]
-    from sentence_transformers import SentenceTransformer
-
-    model = SentenceTransformer(model_name)
-    _ST_MODEL_CACHE[model_name] = model
-    return model
-
-
 @dataclass
 class StressConfig:
-    db_path: str = "data/neurolink.db"
-    out_dir: str = "eval"
-    predict_config: str = "config/forecast/predict_compare.yaml"
-    test_years: list[int] = field(default_factory=lambda: [2023, 2024, 2025])
-    top_k: list[int] = field(default_factory=lambda: [10, 50])
-    models: list[str] = field(
-        default_factory=lambda: ["literature_lora", "mistral_base", "braingpt"]
-    )
+    """Options for the stress / beyond-retrieval block inside ``run_eval``."""
+
     semantic_threshold: float = 0.50
     near_threshold_band: float = 0.05
     length_control_words: int = 12
@@ -83,12 +44,19 @@ class StressConfig:
     max_context_questions: int = 30
     corpus_sample: int = 4000
     corpus_seed: int = 42
-    # Optional: pull existing Job-2 recycling from evaluations table
-    eval_run_id: str | None = None
+    top_k: list[int] = field(default_factory=lambda: [10, 50])
 
 
-def _utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def _st_model(model_name: str):
+    """Load SentenceTransformer once per process (MiniLM required)."""
+    if model_name in _ST_MODEL_CACHE:
+        return _ST_MODEL_CACHE[model_name]
+    from sentence_transformers import SentenceTransformer
+
+    logger.info("Loading SentenceTransformer: %s", model_name)
+    model = SentenceTransformer(model_name)
+    _ST_MODEL_CACHE[model_name] = model
+    return model
 
 
 def _truncate_words(text: str, n: int) -> str:
@@ -374,7 +342,7 @@ def _minilm_retrieve_topk(
     return out
 
 
-def _load_gt(conn: sqlite3.Connection, year: int, cfg: StressConfig) -> list[str]:
+def load_gt(conn: sqlite3.Connection, year: int, cfg: StressConfig) -> list[str]:
     rows = conn.execute(
         "SELECT question_text, is_critical FROM questions WHERE year = ?",
         (year,),
@@ -398,7 +366,7 @@ def _load_gt(conn: sqlite3.Connection, year: int, cfg: StressConfig) -> list[str
     return refs
 
 
-def _load_preds(
+def load_preds(
     conn: sqlite3.Connection,
     year: int,
     model: str,
@@ -415,7 +383,7 @@ def _load_preds(
     return [(r["question_predicted"] or "").strip() for r in rows if (r["question_predicted"] or "").strip()]
 
 
-def _sample_corpus(
+def sample_corpus(
     conn: sqlite3.Connection,
     year: int,
     sample: int,
@@ -436,37 +404,67 @@ def _sample_corpus(
     return [texts[int(i)] for i in idx]
 
 
-def _existing_eval_metrics(
-    conn: sqlite3.Connection,
-    eval_run_id: str | None,
-    year: int,
-    model: str,
+def _gt_covered_mask(
+    preds: list[str],
+    refs: list[str],
+    *,
+    k: int,
+    threshold: float,
+    model_name: str,
+) -> np.ndarray:
+    """Boolean mask over GT: True if some pred in top-k matches that GT."""
+    n_gt = len(refs)
+    top = preds[:k]
+    if not top or n_gt == 0:
+        return np.zeros(n_gt, dtype=bool)
+    sims = _encode(top, model_name) @ _encode(refs, model_name).T
+    return sims.max(axis=0) >= threshold
+
+
+def _beyond_retrieval(
+    model_mask: np.ndarray,
+    baseline_mask: np.ndarray,
 ) -> dict[str, float]:
-    if not eval_run_id:
-        # latest eval row for this model/year
-        row = conn.execute(
-            """
-            SELECT run_id FROM evaluations
-            WHERE target_year=? AND model=?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (year, model),
-        ).fetchone()
-        if not row:
-            return {}
-        eval_run_id = row["run_id"]
-    rows = conn.execute(
-        """
-        SELECT metric, k, value FROM evaluations
-        WHERE run_id=? AND target_year=? AND model=?
-        """,
-        (eval_run_id, year, model),
-    ).fetchall()
-    out: dict[str, float] = {}
-    for r in rows:
-        key = r["metric"] if not r["k"] else f"{r['metric']}@{r['k']}"
-        out[key] = float(r["value"])
-    return out
+    """Success = GT hit by the model that the retrieval baseline missed."""
+    n_gt = int(model_mask.shape[0])
+    if n_gt == 0:
+        return {
+            "n_gt": 0.0,
+            "n_gt_model": 0.0,
+            "n_gt_baseline": 0.0,
+            "n_gt_beyond_baseline": 0.0,
+            "n_gt_union": 0.0,
+            "n_gt_room_after_baseline": 0.0,
+            "frac_gt_model": 0.0,
+            "frac_gt_baseline": 0.0,
+            "frac_gt_beyond_baseline": 0.0,
+            "frac_gt_union": 0.0,
+            "incremental_recall": 0.0,
+            "conditional_beyond": 0.0,
+            "beyond_of_model_hits": 0.0,
+        }
+    n_model = int(model_mask.sum())
+    n_base = int(baseline_mask.sum())
+    beyond = model_mask & ~baseline_mask
+    union = model_mask | baseline_mask
+    n_beyond = int(beyond.sum())
+    n_union = int(union.sum())
+    room = max(n_gt - n_base, 0)
+    return {
+        "n_gt": float(n_gt),
+        "n_gt_model": float(n_model),
+        "n_gt_baseline": float(n_base),
+        "n_gt_beyond_baseline": float(n_beyond),
+        "n_gt_union": float(n_union),
+        "n_gt_room_after_baseline": float(room),
+        "frac_gt_model": n_model / n_gt,
+        "frac_gt_baseline": n_base / n_gt,
+        "frac_gt_beyond_baseline": n_beyond / n_gt,
+        "frac_gt_union": n_union / n_gt,
+        "incremental_recall": (n_union - n_base) / n_gt,
+        "conditional_beyond": (n_beyond / room) if room > 0 else 0.0,
+        "beyond_of_model_hits": (n_beyond / n_model) if n_model > 0 else 0.0,
+    }
 
 
 def _composites(
@@ -482,15 +480,6 @@ def _composites(
     return out
 
 
-def _lit_cfg(predict_config: str, max_context: int) -> LiteratureLoraConfig:
-    from neurolink.forecast.predict.models import PredictConfig
-
-    pred = load_config(predict_config, PredictConfig)
-    lit = pred.literature
-    lit.max_context_questions = max_context
-    return lit
-
-
 def evaluate_cell(
     conn: sqlite3.Connection,
     *,
@@ -500,17 +489,22 @@ def evaluate_cell(
     cfg: StressConfig,
     lit_cfg: LiteratureLoraConfig,
     baselines_cache: dict[tuple[int, int], dict[str, Any]],
+    preds: list[str] | None = None,
+    refs: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    preds = _load_preds(conn, year, model, predict_run_id)
-    refs = _load_gt(conn, year, cfg)
+    if preds is None:
+        preds = load_preds(conn, year, model, predict_run_id)
+    if refs is None:
+        refs = load_gt(conn, year, cfg)
+    preds = [(p or "").strip() for p in preds if (p or "").strip()]
+    refs = [(r or "").strip() for r in refs if (r or "").strip()]
     if not preds or not refs:
         logger.warning("Skip %s %d: preds=%d refs=%d", model, year, len(preds), len(refs))
         return None
 
     context = list_context_questions(conn, year, lit_cfg)
-    corpus = _sample_corpus(conn, year, cfg.corpus_sample, cfg.corpus_seed)
+    corpus = sample_corpus(conn, year, cfg.corpus_sample, cfg.corpus_seed)
 
-    # --- model-side metrics ---
     match: dict[str, Any] = {}
     length_match: dict[str, Any] = {}
     near: dict[str, Any] = {}
@@ -548,19 +542,6 @@ def evaluate_cell(
     )
     composites = _composites(precision_by_k, context_rec, corpus_rec)
 
-    existing = _existing_eval_metrics(conn, cfg.eval_run_id, year, model)
-    # Prefer freshly computed recycling; still expose Job-2 numbers for comparison.
-    job2_ctx = existing.get("contamination_context_recycling")
-    job2_corp = existing.get("contamination_corpus_recycling")
-    job2_composites = {}
-    if job2_ctx is not None and job2_corp is not None:
-        job2_p = {
-            k: existing.get(f"precision@k@{k}", precision_by_k.get(k, 0.0))
-            for k in cfg.top_k
-        }
-        job2_composites = _composites(job2_p, float(job2_ctx), float(job2_corp))
-
-    # --- retrieval baselines (cached per year, max k) ---
     max_k = max(cfg.top_k)
     bkey = (year, max_k)
     if bkey not in baselines_cache:
@@ -568,14 +549,32 @@ def evaluate_cell(
         context_copy = context[:max_k]
         bm25 = _bm25_topk(query, corpus, max_k)
         mini = _minilm_retrieve_topk(context, corpus, max_k, cfg.embed_model)
-        base_out: dict[str, Any] = {"context_copy": {}, "corpus_bm25": {}, "corpus_minilm": {}}
+        base_out: dict[str, Any] = {
+            "context_copy": {},
+            "corpus_bm25": {},
+            "corpus_minilm": {},
+            "_masks": {},
+            "_cands": {
+                "context_copy": context_copy,
+                "corpus_bm25": bm25,
+                "corpus_minilm": mini,
+            },
+        }
         for name, cand in (
             ("context_copy", context_copy),
             ("corpus_bm25", bm25),
             ("corpus_minilm", mini),
         ):
+            base_out["_masks"][name] = {}
             for k in cfg.top_k:
                 base_out[name][str(k)] = _precision_recall(
+                    cand,
+                    refs,
+                    k=k,
+                    threshold=cfg.semantic_threshold,
+                    model_name=cfg.embed_model,
+                )
+                base_out["_masks"][name][str(k)] = _gt_covered_mask(
                     cand,
                     refs,
                     k=k,
@@ -604,6 +603,25 @@ def evaluate_cell(
             len(mini),
         )
 
+    beyond: dict[str, Any] = {}
+    for k in cfg.top_k:
+        model_mask = _gt_covered_mask(
+            preds,
+            refs,
+            k=k,
+            threshold=cfg.semantic_threshold,
+            model_name=cfg.embed_model,
+        )
+        beyond[str(k)] = {}
+        for bname in ("corpus_minilm", "corpus_bm25", "context_copy"):
+            bmask = baselines_cache[bkey]["_masks"][bname][str(k)]
+            beyond[str(k)][bname] = _beyond_retrieval(model_mask, bmask)
+
+    baselines_public = {
+        name: {kk: vv for kk, vv in baselines_cache[bkey][name].items()}
+        for name in ("context_copy", "corpus_bm25", "corpus_minilm")
+    }
+
     return {
         "year": year,
         "model": model,
@@ -623,183 +641,123 @@ def evaluate_cell(
             "corpus_sample_size": len(corpus),
         },
         "composites": composites,
-        "job2_eval_snapshot": existing,
-        "job2_composites_from_snapshot": job2_composites,
+        "beyond_retrieval": beyond,
         "vs_baselines": {
             "delta_p50_minus_context_copy": precision_by_k.get(50, 0.0)
-            - baselines_cache[bkey]["context_copy"].get("50", {}).get("precision", 0.0),
+            - baselines_public["context_copy"].get("50", {}).get("precision", 0.0),
             "delta_p50_minus_corpus_bm25": precision_by_k.get(50, 0.0)
-            - baselines_cache[bkey]["corpus_bm25"].get("50", {}).get("precision", 0.0),
+            - baselines_public["corpus_bm25"].get("50", {}).get("precision", 0.0),
             "delta_p50_minus_corpus_minilm": precision_by_k.get(50, 0.0)
-            - baselines_cache[bkey]["corpus_minilm"].get("50", {}).get("precision", 0.0),
+            - baselines_public["corpus_minilm"].get("50", {}).get("precision", 0.0),
             "delta_p10_minus_context_copy": precision_by_k.get(10, 0.0)
-            - baselines_cache[bkey]["context_copy"].get("10", {}).get("precision", 0.0),
+            - baselines_public["context_copy"].get("10", {}).get("precision", 0.0),
             "delta_p10_minus_corpus_bm25": precision_by_k.get(10, 0.0)
-            - baselines_cache[bkey]["corpus_bm25"].get("10", {}).get("precision", 0.0),
+            - baselines_public["corpus_bm25"].get("10", {}).get("precision", 0.0),
             "delta_p10_minus_corpus_minilm": precision_by_k.get(10, 0.0)
-            - baselines_cache[bkey]["corpus_minilm"].get("10", {}).get("precision", 0.0),
+            - baselines_public["corpus_minilm"].get("10", {}).get("precision", 0.0),
         },
+        "_baselines_public": baselines_public,
+        "_precision_by_k": precision_by_k,
     }
 
 
-def parse_run_specs(specs: list[str]) -> list[tuple[str, str]]:
-    """'run_id' or 'run_id:label' → (run_id, label)."""
-    out: list[tuple[str, str]] = []
-    for s in specs:
-        if ":" in s:
-            rid, label = s.split(":", 1)
-            out.append((rid.strip(), label.strip() or rid.strip()))
-        else:
-            out.append((s.strip(), s.strip()))
-    return out
+def flatten_stress_metrics(cell: dict[str, Any]) -> list[tuple[str, int, float]]:
+    """Flatten a stress cell into ``(metric, k, value)`` rows for ``evaluations``.
+
+    Skips duplicate classic ``precision@k`` / ``recall@k`` (already written by ``run_eval``).
+    Primary success KPI: ``beyond_conditional_corpus_minilm`` (= conditional_beyond).
+    """
+    rows: list[tuple[str, int, float]] = []
+
+    def add(metric: str, value: float, k: int = 0) -> None:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return
+        rows.append((metric, k, float(value)))
+
+    rec = cell.get("recycling") or {}
+    add("stress_recycling_context", rec.get("context", 0.0))
+    add("stress_recycling_corpus", rec.get("corpus_sample", 0.0))
+    add("stress_corpus_sample_size", float(rec.get("corpus_sample_size", 0)))
+
+    for k_str, m in (cell.get("match_length_controlled") or {}).items():
+        k = int(k_str)
+        add("stress_precision_len_ctrl", m["precision"], k)
+        add("stress_recall_len_ctrl", m["recall"], k)
+        add("stress_recall_norm_len_ctrl", m["recall_normalized"], k)
+
+    for k_str, n in (cell.get("near_threshold") or {}).items():
+        k = int(k_str)
+        add("stress_near_frac_matched", n["frac_matched"], k)
+        add("stress_near_frac_band", n["frac_near_threshold"], k)
+        add("stress_near_mean_best_sim", n["mean_best_sim"], k)
+
+    for k_str, d in (cell.get("diversity") or {}).items():
+        k = int(k_str)
+        add("stress_div_trigram", d["unique_trigram_ratio"], k)
+        add("stress_div_pairwise", d["mean_pairwise_cosine_distance"], k)
+        add("stress_div_entropy", d["embedding_entropy"], k)
+
+    for key, val in (cell.get("composites") or {}).items():
+        # novelty_score@50 → metric=stress_novelty, k=50
+        if key.startswith("novelty_score@"):
+            add("stress_novelty", float(val), int(key.rsplit("@", 1)[1]))
+        elif key.startswith("extension_vs_context@"):
+            add("stress_extension_vs_context", float(val), int(key.rsplit("@", 1)[1]))
+        elif key.startswith("extension_vs_corpus@"):
+            add("stress_extension_vs_corpus", float(val), int(key.rsplit("@", 1)[1]))
+
+    baselines = cell.get("_baselines_public") or {}
+    for bname in ("context_copy", "corpus_bm25", "corpus_minilm"):
+        b = baselines.get(bname) or {}
+        for k_str, m in b.items():
+            if k_str in ("n_candidates", "length_controlled") or not isinstance(m, dict):
+                continue
+            if "precision" not in m:
+                continue
+            k = int(k_str)
+            add(f"baseline_{bname}_precision", m["precision"], k)
+            add(f"baseline_{bname}_recall", m["recall"], k)
+
+    for k_str, by_base in (cell.get("beyond_retrieval") or {}).items():
+        k = int(k_str)
+        for bname, stats in by_base.items():
+            add(f"beyond_conditional_{bname}", stats["conditional_beyond"], k)
+            add(f"beyond_incremental_{bname}", stats["incremental_recall"], k)
+            add(f"beyond_n_gt_{bname}", stats["n_gt_beyond_baseline"], k)
+            add(f"beyond_of_model_{bname}", stats["beyond_of_model_hits"], k)
+            add(f"beyond_frac_gt_{bname}", stats["frac_gt_beyond_baseline"], k)
+
+    precision_by_k: dict[int, float] = cell.get("_precision_by_k") or {}
+    for k, p in precision_by_k.items():
+        for bname in ("context_copy", "corpus_bm25", "corpus_minilm"):
+            bp = (baselines.get(bname) or {}).get(str(k), {}).get("precision")
+            if bp is None:
+                continue
+            add(f"delta_p_vs_{bname}", p - float(bp), k)
+
+    return rows
 
 
-def discover_latest_full_runs(conn: sqlite3.Connection, models: list[str], years: list[int]) -> list[str]:
-    """Pick predict run_ids that have ≥25 preds for each model×year (heuristic)."""
-    rows = conn.execute(
-        """
-        SELECT run_id, model, target_year, COUNT(*) AS n
-        FROM predictions
-        GROUP BY run_id, model, target_year
-        """
-    ).fetchall()
-    by_run: dict[str, dict[tuple[str, int], int]] = {}
-    for r in rows:
-        by_run.setdefault(r["run_id"], {})[(r["model"], r["target_year"])] = int(r["n"])
-    good: list[str] = []
-    for rid, counts in by_run.items():
-        ok = all(counts.get((m, y), 0) >= 25 for m in models for y in years)
-        # allow one incomplete cell (BrainGPT 2024 = 25)
-        if not ok:
-            missing = sum(1 for m in models for y in years if counts.get((m, y), 0) < 25)
-            if missing <= 1 and all(counts.get((m, y), 0) >= 10 for m in models for y in years):
-                ok = True
-        if ok:
-            good.append(rid)
-    # chronological by run_id timestamp suffix
-    return sorted(good)
-
-
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db-path", default="data/neurolink.db")
-    p.add_argument("--out-dir", default="eval", help="Directory for JSON output")
-    p.add_argument("--out", default=None, help="Explicit output JSON path (overrides --out-dir)")
-    p.add_argument("--predict-config", default="config/forecast/predict_compare.yaml")
-    p.add_argument("--predict-run-id", action="append", default=None,
-                   help="run_id or run_id:label (repeatable). Default: auto-discover full runs.")
-    p.add_argument("--eval-run-id", default=None, help="Optional Job-2 evaluations.run_id snapshot")
-    p.add_argument("--years", default="2023,2024,2025")
-    p.add_argument("--models", default="literature_lora,mistral_base,braingpt")
-    p.add_argument("--top-k", default="10,50")
-    p.add_argument("--threshold", type=float, default=0.50)
-    p.add_argument("--near-band", type=float, default=0.05)
-    p.add_argument("--length-words", type=int, default=12)
-    p.add_argument("--corpus-sample", type=int, default=4000)
-    p.add_argument("--max-context", type=int, default=30)
-    p.add_argument("--embed-model", default="sentence-transformers/all-MiniLM-L6-v2")
-    p.add_argument("--no-critical-only", action="store_true")
-    args = p.parse_args(argv)
-
-    cfg = StressConfig(
-        db_path=args.db_path,
-        out_dir=args.out_dir,
-        predict_config=args.predict_config,
-        test_years=[int(x) for x in args.years.split(",") if x.strip()],
-        top_k=[int(x) for x in args.top_k.split(",") if x.strip()],
-        models=[x.strip() for x in args.models.split(",") if x.strip()],
-        semantic_threshold=args.threshold,
-        near_threshold_band=args.near_band,
-        length_control_words=args.length_words,
-        embed_model=args.embed_model,
-        critical_only=not args.no_critical_only,
-        corpus_sample=args.corpus_sample,
-        max_context_questions=args.max_context,
-        eval_run_id=args.eval_run_id,
+def stress_config_from_eval(
+    *,
+    top_k: list[int],
+    semantic_threshold: float,
+    embed_model: str,
+    critical_only: bool,
+    filter_gt_noise: bool,
+    corpus_sample: int = 4000,
+    near_threshold_band: float = 0.05,
+    length_control_words: int = 12,
+    max_context_questions: int = 30,
+) -> StressConfig:
+    return StressConfig(
+        top_k=list(top_k),
+        semantic_threshold=semantic_threshold,
+        embed_model=embed_model,
+        critical_only=critical_only,
+        filter_gt_noise=filter_gt_noise,
+        corpus_sample=corpus_sample,
+        near_threshold_band=near_threshold_band,
+        length_control_words=length_control_words,
+        max_context_questions=max_context_questions,
     )
-
-    # Fail fast if MiniLM stack missing (user requires MiniLM; no TF-IDF fallback).
-    try:
-        import sentence_transformers  # noqa: F401
-    except ImportError as e:
-        logger.error(
-            "sentence-transformers is required (MiniLM). Install: pip install sentence-transformers"
-        )
-        raise SystemExit(2) from e
-
-    logger.info("Loading MiniLM once: %s", cfg.embed_model)
-    _st_model(cfg.embed_model)
-
-    db_path = resolve_path(cfg.db_path)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-
-    if args.predict_run_id:
-        run_specs = parse_run_specs(args.predict_run_id)
-    else:
-        found = discover_latest_full_runs(conn, cfg.models, cfg.test_years)
-        if not found:
-            logger.error("No complete predict run_ids found; pass --predict-run-id")
-            return 1
-        run_specs = [(rid, rid) for rid in found]
-        logger.info("Auto-discovered predict runs: %s", run_specs)
-
-    lit_cfg = _lit_cfg(cfg.predict_config, cfg.max_context_questions)
-
-    payload: dict[str, Any] = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "db_path": str(db_path),
-        "config": asdict(cfg),
-        "matcher_backend": "minilm",
-        "embed_model": cfg.embed_model,
-        "rounds": {},
-        "notes": [
-            "Offline stress metrics; no LM regeneration.",
-            "Retrieval baselines use the same MiniLM threshold as model P@k.",
-            "corpus_sample is a seeded subset of questions with year < target_year.",
-            "novelty_score@k = P@k − 0.5*(context_recycling + corpus_recycling).",
-            "recall_normalized_bounded = min(1, recall_normalized).",
-        ],
-    }
-
-    for predict_run_id, label in run_specs:
-        logger.info("=== Round %s (%s) ===", label, predict_run_id)
-        baselines_cache: dict[tuple[int, int], dict[str, Any]] = {}
-        cells: list[dict[str, Any]] = []
-        for model in cfg.models:
-            for year in cfg.test_years:
-                logger.info("Evaluating %s year=%d", model, year)
-                cell = evaluate_cell(
-                    conn,
-                    year=year,
-                    model=model,
-                    predict_run_id=predict_run_id,
-                    cfg=cfg,
-                    lit_cfg=lit_cfg,
-                    baselines_cache=baselines_cache,
-                )
-                if cell:
-                    cells.append(cell)
-        # attach year-level baselines once
-        baselines_by_year = {
-            str(year): baselines_cache[(year, max(cfg.top_k))]
-            for year in cfg.test_years
-            if (year, max(cfg.top_k)) in baselines_cache
-        }
-        payload["rounds"][label] = {
-            "predict_run_id": predict_run_id,
-            "cells": cells,
-            "retrieval_baselines_by_year": baselines_by_year,
-        }
-
-    out_path = Path(args.out) if args.out else resolve_path(cfg.out_dir) / f"stress_metrics_{_utc_stamp()}.json"
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-    logger.info("Wrote %s", out_path)
-    print(out_path)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -16,3 +16,8 @@ brainbench_enabled: true
 contamination_enabled: true
 brainbench_max_pairs: 50
 contamination_corpus_sample: 200
+stress_enabled: true
+stress_corpus_sample: 4000
+stress_near_threshold_band: 0.05
+stress_length_control_words: 12
+stress_max_context_questions: 30

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Verify HuggingFace models are cached for offline GPU jobs on Jean Zay."""
+"""Verify HuggingFace models are cached for offline GPU jobs on Cluster."""
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 REQUIRED_MODELS = [

@@ -1,4 +1,0 @@
-db_path: data/neurolink_sample50.db
-model_name: sentence-transformers/all-MiniLM-L6-v2
-batch_size: 64
-fallback: none
