@@ -1,4 +1,4 @@
-"""Indexing"""
+"""Indexing pipeline: collect → direction → impact → embed."""
 
 from __future__ import annotations
 
@@ -11,30 +11,29 @@ from ..utils.config import load_config, make_run_id, resolve_path
 from .collect import run_collect
 from .embed import run_embed
 from .impact import run_impact
-from .segment import run_segment
+from .subject import run_directions
 
 logger = logging.getLogger(__name__)
 
-INDEX_STAGES = ("collect", "segment", "impact", "embed")
+INDEX_STAGES = ("collect", "direction", "impact", "embed")
 
 
 @dataclass
 class IndexPipelineConfig:
     db_path: str = "data/neurolink.db"
     collect_config: str = "config/index/collect.yaml"
-    segment_config: str = "config/index/segment.yaml"
+    direction_config: str = "config/index/direction.yaml"
     impact_config: str = "config/index/impact.yaml"
     embed_config: str = "config/index/embed.yaml"
     stages: list[str] = field(default_factory=lambda: list(INDEX_STAGES))
-    # Skip the whole index when questions + embeddings are already present.
     skip_if_ready: bool = True
 
 
 @dataclass(frozen=True)
 class IndexCounts:
     articles: int
-    segments: int
-    segments_missing: int
+    directions: int
+    directions_missing: int
     citations: int
     questions: int
     questions_unembedded: int
@@ -51,8 +50,8 @@ def get_index_counts(db_path: str | Path) -> IndexCounts:
     db = Database(path)
     with db.connect(readonly=True) as conn:
         articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        segments = conn.execute("SELECT COUNT(*) FROM article_segments").fetchone()[0]
-        segments_missing = conn.execute(
+        directions = conn.execute("SELECT COUNT(*) FROM article_segments").fetchone()[0]
+        directions_missing = conn.execute(
             """
             SELECT COUNT(*) FROM articles a
             LEFT JOIN article_segments s ON a.pmid = s.pmid
@@ -69,8 +68,8 @@ def get_index_counts(db_path: str | Path) -> IndexCounts:
         ).fetchone()[0]
     return IndexCounts(
         articles=articles,
-        segments=segments,
-        segments_missing=segments_missing,
+        directions=directions,
+        directions_missing=directions_missing,
         citations=citations,
         questions=questions,
         questions_unembedded=questions_unembedded,
@@ -81,15 +80,13 @@ def is_index_ready(db_path: str | Path) -> bool:
     return get_index_counts(db_path).ready
 
 
-def check_index_ready(db_path: str | Path) -> None:
+def check_index_ready(db_path: str | Path) -> tuple[bool, str]:
     counts = get_index_counts(db_path)
     if counts.questions == 0:
-        raise RuntimeError("Index incomplete: no questions in database. Run index pipeline.")
+        return False, "no questions — run login-index + direction-embed"
     if counts.questions_unembedded > 0:
-        raise RuntimeError(
-            f"Index incomplete: {counts.questions_unembedded} questions lack embeddings. "
-            "Run embed stage."
-        )
+        return False, f"{counts.questions_unembedded} questions lack embeddings — run embed"
+    return True, "ready"
 
 
 def run_index(config_path: str | Path | IndexPipelineConfig, run_id: str | None = None) -> str:
@@ -99,11 +96,11 @@ def run_index(config_path: str | Path | IndexPipelineConfig, run_id: str | None 
 
     counts = get_index_counts(cfg.db_path)
     logger.info(
-        "Index status: articles=%d segments=%d(+%d missing) questions=%d "
+        "Index status: articles=%d directions=%d(+%d missing) questions=%d "
         "unembedded=%d citations=%d",
         counts.articles,
-        counts.segments,
-        counts.segments_missing,
+        counts.directions,
+        counts.directions_missing,
         counts.questions,
         counts.questions_unembedded,
         counts.citations,
@@ -116,18 +113,17 @@ def run_index(config_path: str | Path | IndexPipelineConfig, run_id: str | None 
     if "collect" in cfg.stages:
         run_collect(cfg.collect_config)
 
-    if "segment" in cfg.stages:
-        # run_segment itself skips / resumes incomplete articles.
-        run_segment(cfg.segment_config, run_id)
+    if "direction" in cfg.stages:
+        run_directions(cfg.direction_config, run_id)
 
     if "impact" in cfg.stages:
-        # Cheap + idempotent: fills missing citations and rebuilds questions.
         run_impact(cfg.impact_config, run_id)
 
     if "embed" in cfg.stages:
-        # run_embed itself skips questions that already have embeddings.
         run_embed(cfg.embed_config, run_id)
 
-    check_index_ready(cfg.db_path)
+    ok, msg = check_index_ready(cfg.db_path)
+    if not ok:
+        raise RuntimeError(f"Index incomplete: {msg}")
     logger.info("Index layer finished.")
     return run_id

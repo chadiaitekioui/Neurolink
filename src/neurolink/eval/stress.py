@@ -24,6 +24,7 @@ import numpy as np
 from ..forecast.predict.direction_filter import is_clean_gt_text
 from ..forecast.predict.literature_lora import LiteratureLoraConfig, list_context_questions
 
+
 logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[A-Za-z0-9α-ωΑ-Ω]+(?:[-'][A-Za-z0-9α-ωΑ-Ω]+)?")

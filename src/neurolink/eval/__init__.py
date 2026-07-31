@@ -6,7 +6,6 @@ from .matching import EmbeddingMatcher, TfidfMatcher, make_matcher
 from .metrics import EvalConfig, run_eval, write_summary
 from .perplexity import ZlibPplStats, zlib_perplexity_ratio
 from .pipeline import EvalPipelineConfig, run_eval_layer
-from .stress import StressConfig, evaluate_cell, flatten_stress_metrics
 
 __all__ = [
     "BrainBenchResult",
@@ -28,3 +27,11 @@ __all__ = [
     "write_summary",
     "zlib_perplexity_ratio",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"StressConfig", "evaluate_cell", "flatten_stress_metrics"}:
+        from . import stress as _stress
+
+        return getattr(_stress, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

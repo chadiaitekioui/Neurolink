@@ -4,6 +4,8 @@ Modular pipeline to forecast emergent neuroscience research directions from PubM
 
 **Literature LoRA**: fine-tune Mistral-7B on temporal direction pairs, with benchmark against Mistral-7B base and BrainGPT.
 
+![Neurolink](neurolink.png)
+
 ## Why these models?
 
 Neurolink compares three 7B-scale causal LMs on the same forecast task: propose novel neuroscience **research directions** for a target year, given impact-ranked context from prior years. The trio isolates three hypotheses:
@@ -30,8 +32,6 @@ All three models share the same **Year N → Year N+1** continuation protocol an
 
 ## Benchmark results (`year_max=2022` → 2023–2025)
 
-Full audit: `[bench22_inst_base/AUDIT.md](bench22_inst_base/AUDIT.md)`. LoRA-base round vs baselines (mistral_base, braingpt).
-
 Continuity with past literature is **expected**. Absolute P@k is therefore incomplete: a non-generative **corpus MiniLM retrieval** already reaches P@50 ≈ 1.0. The success metric is **how many ground-truth directions the model covers that retrieval misses**.
 
 ### Classic matching (P@50)
@@ -42,7 +42,7 @@ Continuity with past literature is **expected**. Absolute P@k is therefore incom
 | mistral_base           | 0.800     | 0.680     | 0.258     | +0.020         |
 | braingpt               | **0.967** | 0.767     | 0.274     | +0.053         |
 
-![Job-2 Precision@50 by year with MiniLM retrieval floor](figure_p50_job2.svg)
+![Job-2 Precision@50 by year with MiniLM retrieval floor](figure_p50.svg)
 
 LoRA leads generative models on P@50 / R@50 and recycles the **prompt** much less (`extension_vs_context`). BrainGPT wins P@10 (title-like top hits). Absolute P@50 sits below the non-generative MiniLM retrieval floor (~1.0).
 
@@ -73,35 +73,23 @@ Set `HF_TOKEN` for gated models (Mistral-7B, BrainGPT).
 
 ## Quick start
 
+### Interactive menu (cluster jobs)
+
 ```bash
-python -m neurolink menu
+neurolink menu
+# or: neurolink jobs / neurolink submit <job> [--account …] [--time …] [--dry-run]
 ```
 
-Menu: **Index → LoRA → Benchmark → Complete workflow (GPU) → Status**.
-
-Or on Cluster:
+On Cluster:
 
 ```bash
-## Prepare the database (index)
-bash scripts/cluster/setup_login.sh          # deps + cache HF models
-bash scripts/cluster/login_index.sh          # init-db + PubMed collect + OpenAlex impact
-# Then GPU job: LLM subject extraction → rebuild questions → embed
-sbatch scripts/cluster/job1_segment_embed.slurm
-
-#Cluster Job (after the DB is ready):
+bash scripts/cluster/setup_login.sh
+bash scripts/cluster/login_index.sh
+sbatch scripts/cluster/job1_direction_embed.slurm
 sbatch scripts/cluster/job_train_lora_base.slurm
-sbatch scripts/cluster/job_train_lora_instruct.slurm   # optional parallel
-sbatch scripts/cluster/job_benchmark_2022.slurm        # predict + eval (incl. stress / beyond-retrieval)
+sbatch scripts/cluster/job_train_lora_instruct.slurm   # optional
+sbatch scripts/cluster/job_benchmark_2022.slurm
 ```
-
-Local workflow helper:
-
-```bash
-neurolink workflow
-neurolink workflow --skip-index   # if index already built
-```
-
-
 
 ## Reference
 

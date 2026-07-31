@@ -1,7 +1,7 @@
 db_path: data/neurolink.db
 critical_percentile: 0.90
 delay_seconds: 0.1
-# Rebuild questions as research-direction subjects (same subject.* as segment).
+# Rebuild questions as research directions (same subject.* as direction.yaml).
 subject:
   enabled: true
   extraction_mode: llm

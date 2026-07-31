@@ -1,5 +1,0 @@
-track: full
-db_path: data/neurolink.db
-index_config: config/index/pipeline.yaml
-forecast_literature_config: config/forecast/pipeline_literature.yaml
-eval_config: config/eval/pipeline.yaml

@@ -14,22 +14,22 @@
 #SBATCH --export=ALL
 #SBATCH -C v100-32g
 
-# Job 1 — index with LLM subject extraction (replaces PubMedBERT segmentation):
-#   Mistral-7B-Instruct (4-bit) titre+abstract → 1 research direction
+# Job 1 — LLM research-direction extraction → impact → embed:
+#   Mistral-7B-Instruct (4-bit) title+abstract → 1 direction
 #   then impact → embed (MiniLM).
-# Config: config/index/segment.yaml (extraction_mode: llm).
-# Resumes articles missing from article_segments. Wipe segments/questions/embeddings first if re-indexing.
+# Config: config/index/direction.yaml
+# Resumes articles missing from article_segments.
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
 NEUROLINK_ENV_QUIET=1
 source scripts/cluster/env.sh
 
-echo "=== Job 1: LLM extract → impact → embed ==="
+echo "=== Job 1: directions → impact → embed ==="
 neurolink status
-echo "--- LLM subject extraction (Mistral-7B-Instruct, no PubMedBERT) ---"
-neurolink segment --config config/index/segment.yaml --device cuda
-echo "--- Impact (rebuild questions from LLM subjects) ---"
+echo "--- LLM direction extraction (Mistral-7B-Instruct) ---"
+neurolink direction --config config/index/direction.yaml --device cuda
+echo "--- Impact (rebuild questions from directions) ---"
 neurolink impact --config config/index/impact.yaml
 echo "--- Embed MiniLM ---"
 neurolink embed --config config/index/embed.yaml

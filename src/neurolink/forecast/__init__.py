@@ -1,7 +1,9 @@
-"""Forecast: literature LoRA predict + benchmark."""
+"""Forecast: literature LoRA predict + benchmark.
 
-from .benchmark import BENCHMARK_MODELS, resolve_benchmark, run_benchmark
-from .pipeline import LITERATURE_STAGES, ForecastPipelineConfig, run_literature_forecast
+Submodules are imported lazily via ``forecast.train``, ``forecast.benchmark``,
+``forecast.predict.*`` to avoid circular imports with eval/index.
+"""
+
 from .predict.models import (
     LLM_LITERATURE_MODELS,
     MODEL_BRAINGPT,
@@ -12,17 +14,9 @@ from .predict.models import (
     PredictConfig,
     run_predict,
 )
-from .train import (
-    calibration_years,
-    run_lora_forecast,
-    run_train_literature,
-    run_train_literature_errors,
-)
+from .train import calibration_years, run_train_literature
 
 __all__ = [
-    "BENCHMARK_MODELS",
-    "ForecastPipelineConfig",
-    "LITERATURE_STAGES",
     "LLM_LITERATURE_MODELS",
     "MODEL_BRAINGPT",
     "MODEL_FREQUENCY",
@@ -31,11 +25,17 @@ __all__ = [
     "MODEL_RANDOM",
     "PredictConfig",
     "calibration_years",
-    "resolve_benchmark",
     "run_benchmark",
-    "run_literature_forecast",
-    "run_lora_forecast",
     "run_predict",
     "run_train_literature",
-    "run_train_literature_errors",
+    "resolve_benchmark",
+    "BENCHMARK_MODELS",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"run_benchmark", "resolve_benchmark", "BENCHMARK_MODELS"}:
+        from . import benchmark as _benchmark
+
+        return getattr(_benchmark, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

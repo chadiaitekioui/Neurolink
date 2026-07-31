@@ -1,7 +1,6 @@
-"""Level-3 research-direction extraction via causal LM (indexing only).
+"""Research-direction extraction via causal LM (indexing only).
 
-Uses ``mistralai/Mistral-7B-Instruct-v0.2`` (no LoRA) — orthogonal to the literature
-LoRA adapter used at predict time.
+Uses ``mistralai/Mistral-7B-Instruct-v0.2`` — orthogonal to the literature LoRA adapter used for forecasting.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import re
 
 from ..forecast.predict.direction_filter import classify_direction_rejection, strip_list_prefix
 from ..forecast.predict.llm_core import CausalLMConfig, _generate_raw, _load_model
-from ..utils.pubmed_clean import polish_segment_field, structure_abstract_sections
+from ..utils.pubmed_clean import polish_field, structure_abstract_sections
 from .subject import (
     SubjectClassifier,
     SubjectConfig,
@@ -66,8 +65,8 @@ def build_extraction_user_content(
     *,
     abstract_max_chars: int = 3500,
 ) -> str:
-    title = polish_segment_field(title or "Untitled")
-    body = polish_segment_field(abstract or "")
+    title = polish_field(title or "Untitled")
+    body = polish_field(abstract or "")
     if len(body) > abstract_max_chars:
         body = body[: abstract_max_chars - 3].rstrip() + "..."
     return _USER_PROMPT.format(title=title, abstract=body)
@@ -283,10 +282,10 @@ def extract_subject_llm(
 
 
 def results_from_sections(text: str) -> str:
-    """Rule-based results bucket when PubMedBERT segmentation is skipped."""
+    """Rule-based results bucket (IMRaD headers) when storing article_segments.results."""
     parts: list[str] = []
     for content, bucket, section in structure_abstract_sections(text):
         sec = (section or "").upper()
         if bucket == "results" or sec in ("RESULTS", "CONCLUSIONS"):
             parts.append(content)
-    return polish_segment_field(" ".join(parts))
+    return polish_field(" ".join(parts))

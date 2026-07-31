@@ -1,37 +1,27 @@
-"""Extract short research-direction subjects from segmented abstracts.
+"""Extract and persist research *directions* from PubMed abstracts (LLM + MiniLM).
 
-Store research directions (subject spans), not interrogative questions.
-Level 1: rules (section priority, noise filters, 8–25 word span, subjectness heuristics).
-Level 2: light embedding classifier (subject vs noise vs methods) via MiniLM prototypes.
+Index stage formerly called ``segment``: Mistral-Instruct turns title+abstract into
+one short research direction stored in ``article_segments`` (legacy table name).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
-from ..utils.pubmed_clean import (
-    Bucket,
-    is_junk_sentence,
-    polish_segment_field,
-    structure_abstract_sections,
-)
+from ..db import Database
+from ..utils.config import load_config, make_run_id, resolve_path
+from ..utils.pubmed_clean import is_junk_sentence, polish_field
+from ..utils.torch_device import resolve_torch_device
 
 logger = logging.getLogger(__name__)
 
 SubjectLabel = Literal["subject", "noise", "methods"]
-
-# Prefer aim/objective sections over historical background.
-_SECTION_PRIORITY: dict[str, int] = {
-    "OBJECTIVES": 0,
-    "AIM": 1,
-    "AIMS": 1,
-    "PURPOSE": 2,
-    "INTRODUCTION": 3,
-    "BACKGROUND": 4,
-}
 
 _RESULTS_VERBS = re.compile(
     r"\b(?:we (?:found|show(?:ed)?|demonstrate(?:d)?|observed|report(?:ed)?)"
@@ -81,9 +71,6 @@ _PROTOTYPES: dict[SubjectLabel, list[str]] = {
 }
 
 
-ExtractionMode = Literal["rules", "llm", "hybrid"]
-
-
 @dataclass
 class SubjectLlmConfig:
     """Causal LM settings for index-time direction extraction (instruct, no LoRA)."""
@@ -100,11 +87,10 @@ class SubjectLlmConfig:
 
 @dataclass
 class SubjectConfig:
-    """Subject extraction / filtering for index stages."""
+    """Filters / scoring shared by direction extraction and impact."""
 
     enabled: bool = True
-    # rules = L1+L2 span pick; llm = Mistral base extraction; hybrid = llm then rules fallback.
-    extraction_mode: ExtractionMode = "rules"
+    extraction_mode: str = "llm"
     llm: SubjectLlmConfig = field(default_factory=SubjectLlmConfig)
     min_words: int = 8
     max_words: int = 25
@@ -115,8 +101,17 @@ class SubjectConfig:
     use_level2_classifier: bool = True
     classifier_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     weight_impact_by_subjectness: bool = True
-    # Soft floor so very clean but low-impact items are not zeroed.
     impact_subjectness_floor: float = 0.15
+
+
+@dataclass
+class DirectionConfig:
+    """Batch LLM extraction of research directions into ``article_segments``."""
+
+    db_path: str = "data/neurolink.db"
+    device: str = "auto"  # cpu | cuda | auto
+    commit_every: int = 100
+    subject: SubjectConfig = field(default_factory=SubjectConfig)
 
 
 @dataclass
@@ -130,7 +125,7 @@ class SubjectResult:
 
 @dataclass
 class SubjectClassifier:
-    """Level-2 prototype classifier (lazy MiniLM). Falls back to heuristics if unavailable."""
+    """Prototype classifier (lazy MiniLM). Falls back to heuristics if unavailable."""
 
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     _centroids: dict[SubjectLabel, object] = field(default_factory=dict, repr=False)
@@ -147,7 +142,7 @@ class SubjectClassifier:
             from sentence_transformers import SentenceTransformer
         except ImportError:
             logger.warning(
-                "sentence-transformers unavailable — subject classifier disabled (level-1 only)"
+                "sentence-transformers unavailable — subject classifier disabled"
             )
             self._failed = True
             return False
@@ -166,12 +161,11 @@ class SubjectClassifier:
             logger.info("Subject classifier loaded: %s", self.model_name)
             return True
         except Exception as e:
-            logger.warning("Subject classifier load failed (%s) — level-1 only", e)
+            logger.warning("Subject classifier load failed (%s)", e)
             self._failed = True
             return False
 
     def classify(self, text: str) -> tuple[SubjectLabel, float]:
-        """Return (label, confidence in [0, 1])."""
         if not text.strip() or not self._ensure_loaded():
             return "subject", 0.0
 
@@ -184,11 +178,13 @@ class SubjectClassifier:
         scores: dict[SubjectLabel, float] = {}
         for label, centroid in self._centroids.items():
             scores[label] = float(np.dot(emb, centroid))
-        best = max(scores, key=scores.get)
-        # Map cosine [-1,1] → [0,1] confidence vs runner-up.
         ordered = sorted(scores.values(), reverse=True)
         margin = ordered[0] - ordered[1] if len(ordered) > 1 else ordered[0]
-        conf = max(0.0, min(1.0, (ordered[0] + 1.0) / 2.0 * (0.5 + 0.5 * max(margin, 0.0))))
+        best = max(scores, key=scores.get)
+        conf = max(
+            0.0,
+            min(1.0, (ordered[0] + 1.0) / 2.0 * (0.5 + 0.5 * max(margin, 0.0))),
+        )
         return best, conf
 
 
@@ -201,16 +197,7 @@ def get_subject_classifier(model_name: str) -> SubjectClassifier:
     return _CLASSIFIER_CACHE[model_name]
 
 
-def split_sentences(text: str) -> list[str]:
-    return [
-        re.sub(r"\s+", " ", s).strip()
-        for s in re.split(r"(?<=[.!?])\s+", text)
-        if s.strip()
-    ]
-
-
 def is_subject_noise(text: str) -> bool:
-    """Aggressive metadata / junk filter for subject candidates."""
     return is_junk_sentence(text)
 
 
@@ -221,14 +208,12 @@ def compress_to_subject_span(
     max_words: int = 25,
     absolute_min_words: int = 5,
 ) -> str | None:
-    """Trim a sentence to a short research-direction span."""
-    s = polish_segment_field(sentence)
+    s = polish_field(sentence)
     s = _LEADING_FILLER.sub("", s)
     s = _TRAILING_CLAUSE.sub("", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" .;:")
     if not s:
         return None
-    # Drop trailing question mark — subjects are not interrogatives.
     if s.endswith("?"):
         s = s[:-1].rstrip()
     words = s.split()
@@ -239,14 +224,10 @@ def compress_to_subject_span(
         words = s.split()
     if len(words) < absolute_min_words:
         return None
-    # Prefer spans reaching min_words when possible; keep shorter if already compact.
-    if len(words) < min_words and len(words) < absolute_min_words:
-        return None
     return s
 
 
 def heuristic_subjectness(text: str) -> float:
-    """Level-1 subjectness score in [0, 1]."""
     if not text or is_subject_noise(text):
         return 0.0
     words = text.split()
@@ -271,109 +252,6 @@ def heuristic_subjectness(text: str) -> float:
     return float(max(0.0, min(1.0, score)))
 
 
-def _priority_for_section(section: str | None) -> int:
-    if not section:
-        return 50
-    return _SECTION_PRIORITY.get(section.upper(), 40)
-
-
-def _candidate_sentences_from_sections(
-    sections: list[tuple[str, Bucket | None, str | None]],
-) -> list[tuple[str, str | None]]:
-    """Yield (sentence, section) ordered by section priority then appearance."""
-    scored: list[tuple[int, int, str, str | None]] = []
-    order = 0
-    for content, bucket, section in sections:
-        if bucket == "results":
-            continue
-        for sent in split_sentences(content):
-            if is_subject_noise(sent):
-                continue
-            scored.append((_priority_for_section(section), order, sent, section))
-            order += 1
-    scored.sort(key=lambda x: (x[0], x[1]))
-    return [(sent, section) for _, _, sent, section in scored]
-
-
-def _extract_subject_rules(
-    text: str,
-    *,
-    cfg: SubjectConfig,
-    title: str | None = None,
-    classifier: SubjectClassifier | None = None,
-) -> SubjectResult | None:
-    sections = structure_abstract_sections(text)
-    if len(sections) == 1 and sections[0][1] is None and sections[0][2] is None:
-        # Unstructured blob (already a question bucket): treat whole as one section.
-        candidates = [
-            (sent, None)
-            for sent in split_sentences(text)
-            if not is_subject_noise(sent)
-        ]
-    else:
-        candidates = _candidate_sentences_from_sections(sections)
-
-    if title and not candidates:
-        span = compress_to_subject_span(
-            title,
-            min_words=cfg.min_words,
-            max_words=cfg.max_words,
-            absolute_min_words=cfg.absolute_min_words,
-        )
-        if span:
-            candidates = [(span, "TITLE")]
-
-    clf = classifier
-    if cfg.use_level2_classifier and clf is None:
-        clf = get_subject_classifier(cfg.classifier_model)
-
-    best: SubjectResult | None = None
-    for sent, section in candidates:
-        span = compress_to_subject_span(
-            sent,
-            min_words=cfg.min_words,
-            max_words=cfg.max_words,
-            absolute_min_words=cfg.absolute_min_words,
-        )
-        if not span:
-            continue
-        score = heuristic_subjectness(span)
-        label: SubjectLabel = "subject"
-        if clf is not None and cfg.use_level2_classifier:
-            label, conf = clf.classify(span)
-            if label == "noise":
-                score *= 0.15
-            elif label == "methods":
-                score *= 0.35
-            else:
-                score = min(1.0, score + 0.15 * conf)
-        if score < cfg.min_subjectness:
-            continue
-        if label != "subject" and score < cfg.min_subjectness + 0.15:
-            continue
-        cand = SubjectResult(text=span, subjectness=score, label=label, source_section=section)
-        if best is None or cand.subjectness > best.subjectness:
-            best = cand
-
-    if best is None and title:
-        span = compress_to_subject_span(
-            title,
-            min_words=cfg.min_words,
-            max_words=cfg.max_words,
-            absolute_min_words=cfg.absolute_min_words,
-        )
-        if span and not is_subject_noise(span):
-            score = heuristic_subjectness(span)
-            if score >= cfg.min_subjectness:
-                best = SubjectResult(
-                    text=span,
-                    subjectness=score,
-                    label="subject",
-                    source_section="TITLE",
-                )
-    return best
-
-
 def extract_subject(
     text: str,
     *,
@@ -381,35 +259,15 @@ def extract_subject(
     title: str | None = None,
     classifier: SubjectClassifier | None = None,
 ) -> SubjectResult | None:
-    """Extract one research-direction subject from an abstract or question-bucket text."""
+    """Extract one research direction via LLM."""
     cfg = cfg or SubjectConfig()
     if not cfg.enabled:
         return None
     if not (text or "").strip() and not (title or "").strip():
         return None
+    from .subject_llm import extract_subject_llm
 
-    if cfg.extraction_mode in ("llm", "hybrid"):
-        from .subject_llm import extract_subject_llm
-
-        llm_result = extract_subject_llm(
-            title,
-            text,
-            cfg=cfg,
-            classifier=classifier,
-        )
-        if llm_result is not None and not llm_result.reject_reason:
-            return llm_result
-        if cfg.extraction_mode == "llm":
-            return llm_result
-
-    if not (text or "").strip():
-        return None
-    return _extract_subject_rules(
-        text,
-        cfg=cfg,
-        title=title,
-        classifier=classifier,
-    )
+    return extract_subject_llm(title, text, cfg=cfg, classifier=classifier)
 
 
 def year_in_range(year: int | None, cfg: SubjectConfig) -> bool:
@@ -424,3 +282,210 @@ def weighted_impact(impact_score: float | None, subjectness: float, cfg: Subject
         return base
     weight = max(cfg.impact_subjectness_floor, float(subjectness))
     return base * weight
+
+
+def load_pmids_file(path: str | Path) -> list[str]:
+    """Load PMIDs from JSON or plain text."""
+    p = resolve_path(path)
+    text = p.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    if text.startswith("[") or text.startswith("{"):
+        data = json.loads(text)
+        if isinstance(data, list):
+            if data and isinstance(data[0], dict):
+                return [
+                    str(row["pmid"])
+                    for row in data
+                    if isinstance(row, dict) and row.get("pmid")
+                ]
+            return [str(x) for x in data if str(x).strip()]
+        if isinstance(data, dict):
+            if "pmids" in data:
+                return [str(x) for x in data["pmids"] if str(x).strip()]
+            if "samples" in data:
+                return [
+                    str(row["pmid"])
+                    for row in data["samples"]
+                    if isinstance(row, dict) and row.get("pmid")
+                ]
+        raise ValueError(f"Unsupported PMID JSON in {p}")
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
+
+
+def _fetch_articles_for_directions(
+    conn,
+    *,
+    limit: int | None = None,
+    pmids: list[str] | None = None,
+    force: bool = False,
+) -> tuple[list, int]:
+    """Return (worklist rows, already_done_count). Table: ``article_segments``."""
+    if pmids:
+        placeholders = ",".join("?" * len(pmids))
+        if force:
+            rows = conn.execute(
+                f"SELECT pmid, title, abstract, text_work FROM articles WHERE pmid IN ({placeholders})",
+                pmids,
+            ).fetchall()
+            return list(rows), 0
+        rows = conn.execute(
+            f"""
+            SELECT a.pmid, a.title, a.abstract, a.text_work
+            FROM articles a
+            LEFT JOIN article_segments s ON a.pmid = s.pmid
+            WHERE a.pmid IN ({placeholders}) AND s.pmid IS NULL
+            """,
+            pmids,
+        ).fetchall()
+        return list(rows), len(pmids) - len(rows)
+
+    already = conn.execute("SELECT COUNT(*) FROM article_segments").fetchone()[0]
+    q = """
+        SELECT a.pmid, a.title, a.abstract, a.text_work
+        FROM articles a
+        LEFT JOIN article_segments s ON a.pmid = s.pmid
+        WHERE s.pmid IS NULL
+        ORDER BY a.pmid
+    """
+    if limit is not None and limit > 0:
+        rows = conn.execute(q + " LIMIT ?", (limit,)).fetchall()
+    else:
+        rows = conn.execute(q).fetchall()
+    return list(rows), int(already)
+
+
+def extract_direction(
+    abstract: str,
+    *,
+    title: str | None = None,
+    subject_cfg: SubjectConfig | None = None,
+    classifier: SubjectClassifier | None = None,
+) -> tuple[str | None, str, float | None]:
+    """One abstract → (direction text, results bucket, subjectness)."""
+    from .subject_llm import extract_subject_llm, results_from_sections
+
+    cfg = subject_cfg or SubjectConfig()
+    text = (abstract or "").strip()
+    extracted = extract_subject_llm(title, text, cfg=cfg, classifier=classifier)
+    results = results_from_sections(text) if text else ""
+    if extracted is None or extracted.reject_reason:
+        return None, results, 0.0 if extracted is None else extracted.subjectness
+    return extracted.text, results, extracted.subjectness
+
+
+def run_directions(
+    config_path: str | DirectionConfig,
+    run_id: str | None = None,
+    *,
+    limit: int | None = None,
+    pmids: list[str] | None = None,
+    force: bool = False,
+) -> int:
+    """Batch-extract research directions for articles missing from ``article_segments``."""
+    cfg = (
+        load_config(config_path, DirectionConfig)
+        if isinstance(config_path, str)
+        else config_path
+    )
+    if cfg.subject.extraction_mode != "llm":
+        logger.warning(
+            "subject.extraction_mode=%r ignored — directions always use LLM extraction",
+            cfg.subject.extraction_mode,
+        )
+    db = Database(resolve_path(cfg.db_path))
+    run_id = run_id or make_run_id("direction")
+    now = datetime.now(timezone.utc).isoformat()
+    commit_every = max(1, int(cfg.commit_every))
+
+    with db.connect() as conn:
+        total_articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        articles, already = _fetch_articles_for_directions(
+            conn, limit=limit, pmids=pmids, force=force
+        )
+
+    if not articles:
+        logger.info("Directions: nothing to do (%d already extracted)", already)
+        db.record_run(run_id, "direction", notes="0 new")
+        return 0
+
+    scope = ""
+    if pmids:
+        scope = f", pmids={len(pmids)}"
+    elif limit:
+        scope = f", limit={limit}"
+    logger.info(
+        "Directions: %d/%d done (%d remaining%s) — LLM",
+        already,
+        total_articles,
+        len(articles),
+        scope,
+    )
+
+    device = resolve_torch_device(cfg.device)
+    logger.info(
+        "Direction extraction: model=%s device=%s",
+        cfg.subject.llm.base_model,
+        device,
+    )
+
+    classifier = None
+    if cfg.subject.enabled and cfg.subject.use_level2_classifier:
+        classifier = get_subject_classifier(cfg.subject.classifier_model)
+
+    n = 0
+    n_ok = 0
+    with db.connect() as conn:
+        for row in articles:
+            text = (row["text_work"] or row["abstract"] or "").strip()
+            direction, results, qc = extract_direction(
+                text,
+                title=row["title"],
+                subject_cfg=cfg.subject,
+                classifier=classifier,
+            )
+            if qc is not None and qc > 0 and direction:
+                n_ok += 1
+            conn.execute(
+                """
+                INSERT INTO article_segments
+                    (pmid, question, results, segmentation_method, qc_score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pmid) DO UPDATE SET
+                    question=excluded.question, results=excluded.results,
+                    segmentation_method=excluded.segmentation_method,
+                    qc_score=excluded.qc_score, updated_at=excluded.updated_at
+                """,
+                (row["pmid"], direction, results, "llm+direction", qc, now),
+            )
+            n += 1
+            if n % commit_every == 0:
+                conn.commit()
+                done = already + n
+                logger.info(
+                    "Directions: %d/%d (%.1f%%)",
+                    done,
+                    total_articles,
+                    100.0 * done / max(1, total_articles),
+                )
+
+    try:
+        from ..forecast.predict.llm_core import release_gpu_memory
+
+        release_gpu_memory()
+        logger.info("Released LLM VRAM after direction stage")
+    except ImportError:
+        pass
+
+    db.record_run(
+        run_id,
+        "direction",
+        notes=f"{n} new / {already + n} total; ok={n_ok}",
+    )
+    logger.info(
+        "Directions: %d new articles (%d total); extracted=%d",
+        n,
+        already + n,
+        n_ok,
+    )
+    return n

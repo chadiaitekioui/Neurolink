@@ -1,9 +1,9 @@
 db_path: data/neurolink.db
 device: auto
-# Subject extraction: llm replaces PubMedBERT segmentation + span rules.
+# LLM research-direction extraction (Mistral-Instruct).
 subject:
   enabled: true
-  extraction_mode: llm  # rules | llm | hybrid (llm then rules fallback)
+  extraction_mode: llm
   llm:
     base_model: mistralai/Mistral-7B-Instruct-v0.2
     use_4bit: true

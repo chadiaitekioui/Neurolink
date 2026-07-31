@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import requests
@@ -20,8 +20,9 @@ from ..db import Database
 from ..utils.config import load_config, make_run_id, resolve_path
 from .subject import (
     SubjectConfig,
-    extract_subject,
+    compress_to_subject_span,
     get_subject_classifier,
+    heuristic_subjectness,
     weighted_impact,
     year_in_range,
 )
@@ -190,20 +191,27 @@ def _resolve_subject_text(
     if not needs_extract and seg_q:
         return seg_q, qc
 
-    source = (abstract or segment_question or "").strip()
-    # Impact runs on CPU after segment; never reload the index LLM here.
-    reextract_cfg = cfg if cfg.extraction_mode == "rules" else replace(cfg, extraction_mode="rules")
-    extracted = extract_subject(
-        source,
-        cfg=reextract_cfg,
-        title=title,
-        classifier=classifier,
+    # No LLM reload on impact (CPU / post-segment). Polish the stored draft only.
+    span = compress_to_subject_span(
+        seg_q or (abstract or ""),
+        min_words=cfg.min_words,
+        max_words=cfg.max_words,
+        absolute_min_words=cfg.absolute_min_words,
     )
-    if extracted is None:
-        return None, 0.0
-    if extracted.subjectness < cfg.min_subjectness:
-        return None, extracted.subjectness
-    return extracted.text, extracted.subjectness
+    if not span:
+        return None, qc
+    score = heuristic_subjectness(span)
+    if classifier is not None and cfg.use_level2_classifier:
+        label, conf = classifier.classify(span)
+        if label == "noise":
+            score *= 0.15
+        elif label == "methods":
+            score *= 0.35
+        else:
+            score = min(1.0, score + 0.15 * conf)
+    if score < cfg.min_subjectness:
+        return None, score
+    return span, score
 
 
 def _score_and_propagate(cfg: ImpactConfig, db: Database) -> int:

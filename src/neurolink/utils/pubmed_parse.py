@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterator
 
 from .pubmed_clean import (
@@ -114,7 +115,8 @@ def _infer_year(block: str) -> int | None:
     m3 = re.search(r"\b(20\d{2})\b", block[:400])
     if m3:
         y = int(m3.group(1))
-        if 2000 <= y <= 2027:
+        year_hi = datetime.now(timezone.utc).year + 1
+        if 2000 <= y <= year_hi:
             return y
     return None
 

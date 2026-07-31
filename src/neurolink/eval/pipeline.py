@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EvalPipelineConfig:
     db_path: str = "data/neurolink.db"
-    eval_config: str = "config/eval/eval.yaml"
+    eval_config: str = "config/eval/scenarios/eval_compare_2022.yaml"
     predict_run_id: str | None = None
     stages: list[str] = field(default_factory=lambda: ["eval"])
 

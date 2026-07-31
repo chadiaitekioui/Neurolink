@@ -54,7 +54,7 @@ def run_embed(config_path: str | EmbedConfig, run_id: str | None = None) -> int:
         already = total - len(rows)
 
     if total == 0:
-        logger.warning("No questions to embed — run impact after segment first")
+        logger.warning("No questions to embed — run impact after direction extraction first")
         return 0
 
     if not rows:

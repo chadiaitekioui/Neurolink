@@ -232,7 +232,7 @@ _HEAVY_AUTHOR_INDEX = re.compile(r"(?:\([#\d]+\)){2,}|\([#\d]+\)(?:\([#\d]+\))+"
 
 
 def is_junk_sentence(sentence: str) -> bool:
-    """Drop residual metadata before BERT / subject extraction."""
+    """Drop residual metadata before direction extraction / filtering."""
     s = _normalize_ws(sentence)
     if len(s) < 12:
         return True
@@ -259,15 +259,15 @@ def is_junk_sentence(sentence: str) -> bool:
     return False
 
 
-def polish_segment_field(text: str) -> str:
-    """Final whitespace / author cleanup on segmented output."""
+def polish_field(text: str) -> str:
+    """Final whitespace / author cleanup on title, abstract, or direction text."""
     return _strip_inline_noise(text)
 
 
 def structure_abstract_sections(text: str) -> list[tuple[str, Bucket | None, str | None]]:
     """Rules: split on IMRaD headers; return (content, bucket hint, section name).
 
-    bucket hint is set when a header is found; None means BERT must classify.
+    bucket hint is set when a header is found; None means no IMRaD header.
     section is e.g. OBJECTIVES / BACKGROUND / METHODS, or None for preamble.
     """
     if not text or not text.strip():

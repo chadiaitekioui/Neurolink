@@ -13,8 +13,8 @@ unset HF_HUB_OFFLINE
 echo "=== Login index: collect + citations (HTTP) ==="
 neurolink init-db
 neurolink collect --config config/index/collect.yaml
-# Citations only need articles; questions are filled after segment in job1.
+# Citations only need articles; questions are filled after direction extraction in job1.
 neurolink impact --config config/index/impact.yaml
 neurolink status
-echo "=== Done. Submit GPU job: sbatch scripts/cluster/job1_segment_embed.slurm ==="
-echo "    (job1 skips segment/embed work already complete; MiniLM embed by default)"
+echo "=== Done. Submit GPU job: sbatch scripts/cluster/job1_direction_embed.slurm ==="
+echo "    (job1 skips direction/embed work already complete; MiniLM embed by default)"
