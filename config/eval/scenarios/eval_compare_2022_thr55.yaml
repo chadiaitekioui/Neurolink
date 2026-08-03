@@ -1,0 +1,31 @@
+# Side experiment: same 2022→2023–2025 bench as eval_compare_2022.yaml,
+# but MiniLM match threshold τ=0.55 (baseline 0.50; thr70≈0.04 floor; thr90=0).
+# Goal: find a corpus_minilm P@50 floor close to 1 without saturating — no re-predict.
+#
+# Key metric: baseline_corpus_minilm_precision @ k=50 (per year).
+# BrainBench / contamination off to keep the job focused and faster.
+
+db_path: data/neurolink.db
+test_years: [2023, 2024, 2025]
+top_k: [10, 50]
+models:
+  - literature_lora
+  - mistral_base
+  - braingpt
+semantic_threshold: 0.55
+matcher_backend: minilm
+embed_model: sentence-transformers/all-MiniLM-L6-v2
+critical_only: true
+filter_gt_noise: true
+min_pred_coverage: 0.5
+predict_config: config/forecast/predict_compare.yaml
+lora_year_max: 2022
+brainbench_enabled: false
+contamination_enabled: false
+brainbench_max_pairs: 50
+contamination_corpus_sample: 200
+stress_enabled: true
+stress_corpus_sample: 4000
+stress_near_threshold_band: 0.05
+stress_length_control_words: 12
+stress_max_context_questions: 30

@@ -92,6 +92,14 @@ JOBS: dict[str, JobSpec] = {
         description="Re-score existing 2022 bench preds with MiniLM match 0.70; corpus_minilm P@50 floor.",
         overridable=("account", "time", "qos", "constraint", "job_name"),
     ),
+    "eval-thr55": JobSpec(
+        key="eval-thr55",
+        title="Eval thr55 (τ=0.55, no re-predict)",
+        kind="sbatch",
+        script="scripts/cluster/job_eval_thr55.slurm",
+        description="Re-score existing 2022 bench preds with MiniLM match 0.55; corpus_minilm P@50 floor.",
+        overridable=("account", "time", "qos", "constraint", "job_name"),
+    ),
     "reindex-specific": JobSpec(
         key="reindex-specific",
         title="Specific dirs — copy DB + force re-extract → impact → embed",
