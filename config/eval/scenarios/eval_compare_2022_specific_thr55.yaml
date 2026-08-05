@@ -1,0 +1,27 @@
+# Specific bench: re-eval existing preds with MiniLM match τ=0.55.
+# No re-predict. Key metric: baseline_corpus_minilm_precision @ k=50.
+
+db_path: data/neurolink_specific.db
+test_years: [2023, 2024, 2025]
+top_k: [10, 50]
+models:
+  - literature_lora
+  - mistral_base
+  - braingpt
+semantic_threshold: 0.55
+matcher_backend: minilm
+embed_model: sentence-transformers/all-MiniLM-L6-v2
+critical_only: true
+filter_gt_noise: true
+min_pred_coverage: 0.5
+predict_config: config/forecast/predict_compare_specific.yaml
+lora_year_max: 2022
+brainbench_enabled: false
+contamination_enabled: false
+brainbench_max_pairs: 50
+contamination_corpus_sample: 200
+stress_enabled: true
+stress_corpus_sample: 4000
+stress_near_threshold_band: 0.05
+stress_length_control_words: 12
+stress_max_context_questions: 30

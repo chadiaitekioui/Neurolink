@@ -124,6 +124,14 @@ JOBS: dict[str, JobSpec] = {
         description="Specific-direction LoRA vs mistral_base vs braingpt (2023–2025).",
         overridable=("account", "time", "qos", "constraint", "job_name"),
     ),
+    "eval-specific-thr-sweep": JobSpec(
+        key="eval-specific-thr-sweep",
+        title="Eval specific τ sweep (0.55/0.60/0.70)",
+        kind="sbatch",
+        script="scripts/cluster/job_eval_specific_thr_sweep.slurm",
+        description="Re-score specific-bench preds at MiniLM τ=0.55, 0.60, 0.70; no re-predict.",
+        overridable=("account", "time", "qos", "constraint", "job_name"),
+    ),
     "train-base-2026": JobSpec(
         key="train-base-2026",
         title="Train LoRA-base (year_max=2026)",
@@ -152,6 +160,7 @@ JOB_ORDER = (
     "reindex-specific",
     "train-base-specific",
     "benchmark-specific",
+    "eval-specific-thr-sweep",
     "train-base-2026",
     "forecast-2025",
 )
